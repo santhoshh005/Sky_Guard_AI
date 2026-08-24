@@ -252,8 +252,10 @@ for param in PARAMETERS:
         flags[param].append('range')
     
     # FROZEN: same value for >= 4 consecutive observations
-    # Exception: rainfall == 0 is valid (no rain)
-    if param != 'rainfall' or val != 0:
+    # Exception: rainfall == 0 is valid anytime (no rain); solar_radiation == 0 is valid ONLY at night (outside §9.1 06:00-18:00 window)
+    is_daytime = 6 <= current_observed_at.hour <= 18
+    is_zero_natural = (param == 'rainfall' and val == 0) or (param == 'solar_radiation' and val == 0 and not is_daytime)
+    if not is_zero_natural:
         recent = last_N_values(station_id, param, n=4)
         if len(set(recent)) == 1 and len(recent) == 4:
             flags[param].append('frozen')

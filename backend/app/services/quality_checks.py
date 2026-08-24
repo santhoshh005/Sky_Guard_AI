@@ -67,8 +67,14 @@ class QualityChecker:
             if val < BOUNDS[param]["min"] or val > BOUNDS[param]["max"]:
                 flags[param].append("range")
 
-            # C. FROZEN: >= 4 consecutive identical values (exempt rainfall == 0 and solar_radiation == 0)
-            is_zero_natural = (param == "rainfall" and val == 0.0) or (param == "solar_radiation" and val == 0.0)
+            # C. FROZEN: >= 4 consecutive identical values
+            # Rainfall == 0 is unconditionally valid (rain absence).
+            # Solar radiation == 0 is ONLY valid at night (outside §9.1 sunrise=6, sunset=18 window).
+            # A solar sensor stuck at 0 during daytime (06:00-18:00) is an active fault and MUST trigger frozen.
+            hour_val = (curr_time.hour + curr_time.minute / 60.0) if curr_time else 12.0
+            is_daytime = 6.0 <= hour_val <= 18.0
+            is_zero_natural = (param == "rainfall" and val == 0.0) or (param == "solar_radiation" and val == 0.0 and not is_daytime)
+
             if not is_zero_natural:
                 past_values = [
                     float(h[param])
