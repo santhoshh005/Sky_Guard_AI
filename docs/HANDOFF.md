@@ -166,13 +166,22 @@ Direct observation values: `temperature, humidity, pressure, wind_speed, wind_di
 
 ### 2.2 Rolling Statistics (84 features)
 
-For each of the 7 parameters, compute over 3 window sizes (1h=4obs, 6h=24obs, 24h=96obs):
+For each of the 7 parameters, compute over 3 **time-range** windows (1h, 6h, 24h).
+Query: `SELECT {param} FROM observations WHERE station_id = ? AND observed_at BETWEEN (current - window) AND current`.
+This is **not** a fixed observation count — it adapts to each station's `expected_interval_min` and tolerates gaps.
+
 - `{param}_mean_{window}`
 - `{param}_std_{window}`
 - `{param}_min_{window}`
 - `{param}_max_{window}`
 
+If a window contains < 2 observations, fill the stat features with 0 (mean/std) or the raw value (min/max).
+
 Total: 7 × 3 × 4 = 84 features
+
+> **APPLIES UNIFORMLY**: This time-range convention governs all rolling/baseline
+> functions throughout the spec: `rolling_std_24h` (§3.1), `rolling_mean_24h` (§4.2, §5),
+> `baseline_mean` / `baseline_std` (§4.2, §5 Rule 4). Never use fixed obs counts.
 
 ### 2.3 Rate of Change (7 features)
 
@@ -460,12 +469,14 @@ if ae_score > 0.5:
     top_shap_params = get_top_shap_parameters(shap_values, n=3)
     for param in top_shap_params:
         mean_24h = rolling_mean_24h(station_id, param)
-        baseline_30d = baseline_mean_30d(station_id, param)
-        baseline_std = baseline_std_30d(station_id, param)
-        if baseline_std > 0 and abs(mean_24h - baseline_30d) > 2 * baseline_std:
-            shift = mean_24h - baseline_30d
+        # ADAPTIVE BASELINE: use all history older than 24h, require >= 3 days
+        baseline = get_baseline(station_id, param)  # see §14.3
+        if baseline is None:
+            continue  # not enough history
+        if baseline.std > 0 and abs(mean_24h - baseline.mean) > 2 * baseline.std:
+            shift = mean_24h - baseline.mean
             root_cause = 'drift'
-            explanation = f'{param} mean shifted by {shift:.2f} over last 24h (baseline: {baseline_30d:.2f}±{baseline_std:.2f}). Possible calibration drift.'
+            explanation = f'{param} mean shifted by {shift:.2f} over last 24h (baseline: {baseline.mean:.2f}±{baseline.std:.2f}). Possible calibration drift.'
             break
 ```
 
@@ -1106,14 +1117,23 @@ def inject_spike(observation, params, magnitude=3.0):
     return observation
 
 def inject_frozen(station_id, params, duration_minutes=60):
-    """Repeat the same value for duration/interval observations."""
+    """Repeat the same value for target params only; other params get fresh normal values."""
+    station = get_station(station_id)
     count = duration_minutes // station.expected_interval_min
-    frozen_value = get_last_observation(station_id)
+    last_obs = get_last_observation(station_id)
+    frozen_values = {p: last_obs[p] for p in params}  # snapshot values to freeze
     for i in range(count):
-        obs = copy(frozen_value)
-        obs.observed_at += timedelta(minutes=station.expected_interval_min * (i+1))
-        # Only freeze specified params, generate normal values for others
-        insert_observation(obs)
+        timestamp = last_obs.observed_at + timedelta(minutes=station.expected_interval_min * (i + 1))
+        hour = timestamp.hour + timestamp.minute / 60
+        obs = {}
+        for p in PARAMETERS:
+            if p in frozen_values:
+                obs[p] = frozen_values[p]  # held constant
+            else:
+                obs[p] = generate_value(p, hour)  # fresh normal value
+        obs['station_code'] = station.station_code
+        obs['observed_at'] = timestamp
+        ingest_observation(obs)  # full pipeline: score → alert → WS
 
 def inject_drift(station_id, params, duration_minutes=360, magnitude=2.0):
     """Gradually shift values over time."""
@@ -1261,4 +1281,205 @@ Run once before starting the backend:
 
 ---
 
-*End of handoff specification. Flash: execute §0 task list in order. All design decisions are final — do not re-derive.*
+*End of original handoff specification.*
+
+---
+
+## §14 — Addendum: Ambiguity Resolutions (2026-08-24 Patch)
+
+### 14.1 Per-Parameter Anomaly Attribution (supplements §4.2)
+
+The health scorer needs to know which *specific parameters* are anomalous in a given observation. Derive as follows:
+
+```python
+def get_flagged_parameters(qc_flags: dict, shap_values: dict) -> set[str]:
+    """
+    A parameter is 'flagged' if:
+      (a) it has ANY QC flag in qc_flags[param], OR
+      (b) its SHAP parameter_contribution >= 0.15
+    Return the union.
+    """
+    flagged = set()
+
+    # (a) QC-flagged
+    for param in PARAMETERS:
+        if qc_flags.get(param, []):
+            flagged.add(param)
+
+    # (b) SHAP-flagged (threshold: 0.15 of normalized contribution)
+    contributions = shap_values.get('parameter_contributions', {})
+    for param, contrib in contributions.items():
+        if contrib >= 0.15:
+            flagged.add(param)
+
+    return flagged
+```
+
+### 14.2 Per-Parameter Autoencoder Error (supplements §4.2)
+
+The autoencoder input is 14 dims: indices `[0..6]` = normalized raw values, indices `[7..13]` = deltas. Parameter `i` (by `PARAMETERS` list order) maps to dims `i` and `i+7`.
+
+```python
+def ae_per_param_error(reconstructed: np.ndarray, original: np.ndarray, param: str) -> float:
+    """
+    Compute per-parameter reconstruction error from the autoencoder.
+    Returns mean squared error across the 2 dims belonging to this parameter.
+    """
+    i = PARAMETERS.index(param)
+    raw_err = (original[i] - reconstructed[i]) ** 2
+    delta_err = (original[i + 7] - reconstructed[i + 7]) ** 2
+    return (raw_err + delta_err) / 2.0
+```
+
+Usage in health scorer (§4.2): compare `ae_per_param_error(param)` against threshold `0.7` (scaled relative to `threshold_95th_percentile`):
+
+```python
+param_ae = ae_per_param_error(reconstructed, original, param)
+scaled_param_ae = min(1.0, param_ae / (threshold_95th_percentile / 7))  # per-dim share of threshold
+if scaled_param_ae > 0.7:
+    penalty += 1.5
+```
+
+### 14.3 Adaptive Baseline for Drift Detection (supplements §5 Rule 4)
+
+Replace all references to `baseline_mean_30d` / `baseline_std_30d` with this adaptive function:
+
+```python
+from dataclasses import dataclass
+from datetime import timedelta
+
+@dataclass
+class Baseline:
+    mean: float
+    std: float
+    observation_count: int
+
+def get_baseline(station_id: str, param: str, current_time=None) -> Baseline | None:
+    """
+    Compute baseline statistics from all observations OLDER than 24h.
+    Returns None if fewer than 3 days of history exist.
+
+    This works with 7-day bootstrap: baseline = days 1-6 (excl last 24h).
+    In production with 60+ days: baseline = all history except last 24h.
+    """
+    if current_time is None:
+        current_time = utcnow()
+
+    cutoff = current_time - timedelta(hours=24)
+
+    # Query: all observations for this station+param older than 24h
+    values = query_param_values(station_id, param, before=cutoff)
+
+    if len(values) == 0:
+        return None
+
+    # Check minimum history: earliest obs must be >= 3 days before cutoff
+    earliest = get_earliest_observation_time(station_id)
+    if (cutoff - earliest).total_seconds() < 3 * 86400:
+        return None  # not enough baseline history
+
+    return Baseline(
+        mean=np.mean(values),
+        std=np.std(values),
+        observation_count=len(values)
+    )
+```
+
+Also applies to `is_drifting()` in §4.2 health scorer — use the same `get_baseline()` function.
+
+### 14.4 Demo Injection Pipeline (supplements §8.7, §9.2)
+
+**All injected observations go through the full ingestion pipeline.** This is confirmed and intentional:
+
+```
+inject_* → build observation dict → call ingest_observation()
+                                          ↓
+                                   same path as POST /observations:
+                                   store raw → QC → feature eng → ML score →
+                                   fusion → root cause → health update →
+                                   correction → alert generation → WS broadcast
+```
+
+This means:
+1. `inject_spike` calls `ingest_observation()`, not `insert_observation()`
+2. `inject_frozen` calls `ingest_observation()` (already fixed above in §9.2)
+3. `inject_drift` calls `ingest_observation()`
+4. `inject_multivariate` calls `ingest_observation()`
+5. `inject_missing` is the exception — it inserts nothing (the absence IS the anomaly; the next real/injected observation will detect the timestamp gap)
+
+The `ingest_observation()` function is the internal version of what `POST /observations` does:
+
+```python
+async def ingest_observation(obs_dict: dict) -> tuple[Observation, AnomalyScore]:
+    """
+    Full ingestion pipeline. Used by both the REST endpoint and demo injectors.
+    1. Resolve station_code → station_id
+    2. Insert into observations table
+    3. Run QC checks
+    4. Extract features
+    5. Run IF + AE scoring
+    6. Fuse scores
+    7. Classify root cause
+    8. Update sensor health
+    9. Estimate corrected values
+    10. Create alerts if needed
+    11. Broadcast via WebSocket
+    Returns (observation, anomaly_score)
+    """
+    ...
+```
+
+### 14.5 Updated inject_spike and inject_drift (supplements §9.2)
+
+These must also route through the full pipeline:
+
+```python
+def inject_spike(station_id, params, magnitude=3.0):
+    """Inject a single spiked observation through the full pipeline."""
+    station = get_station(station_id)
+    last_obs = get_last_observation(station_id)
+    timestamp = last_obs.observed_at + timedelta(minutes=station.expected_interval_min)
+    hour = timestamp.hour + timestamp.minute / 60
+    obs = {p: generate_value(p, hour) for p in PARAMETERS}
+    for p in params:
+        std = NORMAL_PROFILES[p].get('noise_std', 1.0)
+        obs[p] += magnitude * 10 * std * random.choice([-1, 1])
+    obs['station_code'] = station.station_code
+    obs['observed_at'] = timestamp
+    ingest_observation(obs)  # full pipeline
+
+def inject_drift(station_id, params, duration_minutes=360, magnitude=2.0):
+    """Inject gradually drifting observations through the full pipeline."""
+    station = get_station(station_id)
+    count = duration_minutes // station.expected_interval_min
+    last_obs = get_last_observation(station_id)
+    for i in range(count):
+        timestamp = last_obs.observed_at + timedelta(minutes=station.expected_interval_min * (i + 1))
+        hour = timestamp.hour + timestamp.minute / 60
+        obs = {p: generate_value(p, hour) for p in PARAMETERS}
+        for p in params:
+            drift = magnitude * NORMAL_PROFILES[p].get('noise_std', 1.0) * (i / count)
+            obs[p] += drift
+        obs['station_code'] = station.station_code
+        obs['observed_at'] = timestamp
+        ingest_observation(obs)  # full pipeline
+
+def inject_multivariate(station_id, params=None, magnitude=2.0):
+    """Inject a single observation with correlated shifts across >= 3 params."""
+    station = get_station(station_id)
+    if params is None:
+        params = random.sample(PARAMETERS, k=min(4, len(PARAMETERS)))
+    last_obs = get_last_observation(station_id)
+    timestamp = last_obs.observed_at + timedelta(minutes=station.expected_interval_min)
+    hour = timestamp.hour + timestamp.minute / 60
+    obs = {p: generate_value(p, hour) for p in PARAMETERS}
+    for p in params:
+        obs[p] += magnitude * NORMAL_PROFILES[p].get('noise_std', 1.0) * 5
+    obs['station_code'] = station.station_code
+    obs['observed_at'] = timestamp
+    ingest_observation(obs)  # full pipeline
+```
+
+---
+
+*End of addendum. All four ambiguities resolved. Flash: proceed with §0 task list.*
