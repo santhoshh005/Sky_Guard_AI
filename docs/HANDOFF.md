@@ -1340,6 +1340,14 @@ if scaled_param_ae > 0.7:
     penalty += 1.5
 ```
 
+> **CALIBRATION NOTE**: The `/ 7` divisor assumes equal error contribution per
+> parameter. In practice, temperature and pressure typically dominate AE
+> reconstruction error while wind_direction contributes much less. If health
+> scores appear too harsh or too lenient for specific parameters during testing,
+> replace the uniform `/ 7` with per-parameter thresholds computed from the
+> training set: `per_param_threshold[p] = np.percentile(training_errors[:, i], 95)`
+> for each parameter index `i`. This is a tuning constant, not a formula bug.
+
 ### 14.3 Adaptive Baseline for Drift Detection (supplements §5 Rule 4)
 
 Replace all references to `baseline_mean_30d` / `baseline_std_30d` with this adaptive function:
