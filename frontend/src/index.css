@@ -5,58 +5,117 @@
 @layer base {
   body {
     font-family: 'Inter', sans-serif;
-    color: #f1f5f9;
-    background-color: #020617;
+    color: #e2e8f0;
+    background-color: #050b1a;
+    background-image: 
+      radial-gradient(ellipse 80% 80% at 50% -20%, rgba(0, 240, 255, 0.08), transparent),
+      radial-gradient(ellipse 60% 60% at 100% 50%, rgba(52, 211, 153, 0.04), transparent),
+      linear-gradient(180deg, #060d21 0%, #030712 100%);
+    background-attachment: fixed;
+    min-height: 100vh;
   }
 }
 
-/* Custom map & pulse styles */
+/* Custom Cyberpunk / Glassmorphic Utility Classes */
+.glass-panel {
+  background: rgba(10, 18, 42, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.15);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-panel-hover {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.glass-panel-hover:hover {
+  border-color: rgba(0, 240, 255, 0.4);
+  box-shadow: 0 12px 40px 0 rgba(0, 240, 255, 0.12);
+  transform: translateY(-2px);
+}
+
+.hud-border {
+  position: relative;
+}
+.hud-border::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #00f0ff, transparent);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #070d1e;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00f0ff;
+}
+
+/* Telemetry Ticker Marquee Animation */
+@keyframes ticker {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-ticker {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ticker 45s linear infinite;
+}
+.animate-ticker:hover {
+  animation-play-state: paused;
+}
+
+/* Leaflet Overrides */
 .leaflet-container {
   width: 100%;
   height: 100%;
   border-radius: 0.75rem;
-  background-color: #0f172a;
+  background-color: #070d1e;
+  font-family: inherit;
 }
 
-.pulse-marker-healthy {
-  background: #22c55e;
-  box-shadow: 0 0 15px #22c55e;
-  border-radius: 50%;
-  width: 14px;
-  height: 14px;
-  border: 2px solid #ffffff;
+.custom-leaflet-popup .leaflet-popup-content-wrapper {
+  background: #0b132b !important;
+  color: #f1f5f9 !important;
+  border: 1px solid rgba(0, 240, 255, 0.3) !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 0 10px 30px rgba(0, 240, 255, 0.15) !important;
+}
+.custom-leaflet-popup .leaflet-popup-tip {
+  background: #0b132b !important;
 }
 
-.pulse-marker-degraded {
-  background: #f59e0b;
-  box-shadow: 0 0 15px #f59e0b;
-  border-radius: 50%;
-  width: 14px;
-  height: 14px;
-  border: 2px solid #ffffff;
-}
-
-.pulse-marker-critical {
-  background: #ef4444;
-  box-shadow: 0 0 20px #ef4444;
-  border-radius: 50%;
-  width: 16px;
-  height: 16px;
-  border: 2px solid #ffffff;
-  animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
-}
-
-@keyframes pulse-ring {
+/* Pulse radar marker animations */
+@keyframes radar-sweep {
   0% {
-    transform: scale(0.9);
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-  }
-  70% {
-    transform: scale(1.1);
-    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+    transform: scale(0.8);
+    opacity: 0.8;
   }
   100% {
-    transform: scale(0.9);
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    transform: scale(2.4);
+    opacity: 0;
   }
+}
+
+.radar-ping {
+  position: absolute;
+  border-radius: 9999px;
+  animation: radar-sweep 2s cubic-bezier(0, 0, 0.2, 1) infinite;
 }
