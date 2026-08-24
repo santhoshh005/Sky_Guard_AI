@@ -57,6 +57,8 @@ export default function Alerts() {
 
         <div className="flex flex-wrap items-center gap-3">
           <select
+            id="resolvedFilter"
+            name="resolvedFilter"
             value={resolvedFilter}
             onChange={(e) => setResolvedFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"
@@ -67,6 +69,8 @@ export default function Alerts() {
           </select>
 
           <select
+            id="alertSeverityFilter"
+            name="alertSeverityFilter"
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"

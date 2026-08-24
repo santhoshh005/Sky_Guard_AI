@@ -266,7 +266,8 @@ class DemoInjectRequest(BaseModel):
     station_id: str
     anomaly_type: str = Field(..., example="spike")  # 'spike', 'frozen', 'drift', 'missing', 'multivariate'
     parameters: Optional[List[str]] = Field(None, example=["temperature"])
-    duration_minutes: Optional[int] = 30
+    duration_minutes: Optional[int] = None
+    duration_min: Optional[int] = None
     magnitude: Optional[float] = 3.0
 
 
@@ -278,8 +279,10 @@ class DemoInjectResponse(BaseModel):
 
 
 class DemoGenerateRequest(BaseModel):
-    station_id: str
-    hours: int = 24
+    station_id: Optional[str] = None
+    station_ids: Optional[List[str]] = None
+    days: Optional[int] = None
+    hours: Optional[int] = None
     interval_min: Optional[int] = 15
 
 

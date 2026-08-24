@@ -45,7 +45,7 @@ async def inject_synthetic_anomaly(payload: DemoInjectRequest):
     anomaly_type = payload.anomaly_type.lower()
     target_params = payload.parameters or [random.choice(["temperature", "humidity", "pressure"])]
     magnitude = payload.magnitude or 3.0
-    duration_min = payload.duration_minutes or 30
+    duration_min = payload.duration_minutes or payload.duration_min or 30
 
     injected_obs_ids: List[str] = []
 
@@ -158,17 +158,22 @@ async def inject_synthetic_anomaly(payload: DemoInjectRequest):
 @router.post("/generate-data", response_model=DemoGenerateResponse)
 async def generate_synthetic_normal_data(payload: DemoGenerateRequest):
     """Generate and ingest continuous clean historical observations for a station."""
-    station = await get_station_by_id(payload.station_id)
+    target_id = payload.station_id or (payload.station_ids[0] if payload.station_ids else None)
+    if not target_id:
+        raise HTTPException(status_code=400, detail="station_id or station_ids must be provided")
+
+    station = await get_station_by_id(target_id)
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
 
+    hours = payload.hours or ((payload.days or 1) * 24)
     station_code = station["station_code"]
     elevation_m = station.get("elevation_m") or 0.0
     interval_min = payload.interval_min or station.get("expected_interval_min", 15)
-    num_obs = int((payload.hours * 60) / interval_min)
+    num_obs = int((hours * 60) / interval_min)
 
     now = datetime.now(timezone.utc)
-    start_time = now - timedelta(hours=payload.hours)
+    start_time = now - timedelta(hours=hours)
 
     series = generate_time_series(
         station_code=station_code,

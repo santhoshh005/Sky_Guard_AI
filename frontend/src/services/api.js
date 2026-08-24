@@ -2,8 +2,9 @@
  * API Client & WebSocket Service for SkyGuard AI
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
-const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/api/v1/ws/live';
+const hostname = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
+const API_BASE = import.meta.env.VITE_API_URL || `http://${hostname}:8000/api/v1`;
+const WS_BASE = import.meta.env.VITE_WS_URL || `ws://${hostname}:8000/api/v1/ws/live`;
 
 async function fetchJson(endpoint, options = {}) {
   const url = `${API_BASE}${endpoint}`;

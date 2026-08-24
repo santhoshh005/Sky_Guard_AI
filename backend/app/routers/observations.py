@@ -58,10 +58,25 @@ async def get_station_by_code(code: str) -> Optional[Dict[str, Any]]:
 async def get_station_by_id(stn_id: str) -> Optional[Dict[str, Any]]:
     if stn_id in station_id_cache:
         return station_id_cache[stn_id]
-    res = await db_client.select("stations", params={"id": f"eq.{stn_id}", "limit": 1})
+    if stn_id in station_cache:
+        return station_cache[stn_id]
+
+    # Check if stn_id looks like a UUID
+    is_uuid = False
+    try:
+        uuid.UUID(stn_id)
+        is_uuid = True
+    except (ValueError, AttributeError):
+        is_uuid = False
+
+    if is_uuid:
+        res = await db_client.select("stations", params={"id": f"eq.{stn_id}", "limit": 1})
+    else:
+        res = await db_client.select("stations", params={"station_code": f"eq.{stn_id}", "limit": 1})
+
     if res:
         stn = res[0]
-        station_id_cache[stn_id] = stn
+        station_id_cache[stn["id"]] = stn
         station_cache[stn["station_code"]] = stn
         return stn
     return None
