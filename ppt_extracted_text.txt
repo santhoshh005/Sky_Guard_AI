@@ -1,0 +1,332 @@
+=== ppt/slides/slide1.xml ===
+SKYGUARD AI
+AI/ML-Based Intelligent Anomaly Detection for Automatic Weather Stations (AWS)
+PROBLEM STATEMENT: SIH26073
+THEME: Disaster Management |
+CATEGORY: Software
+ORGANIZATION: Ministry of Earth Sciences (
+MoES
+)
+DEPARTMENT: India Meteorological Department (IMD)
+TEAM NAME: BINARY MINDS
+
+=== ppt/slides/slide2.xml ===
+MEET THE TEAM: BINARY MINDS
+CHALICHEEMALA SURYA THEJAS
+Team Leader
+KOMMI DRUTHENDRA
+ML Engineer
+GADDAM SAI SANTHOSH
+Full-Stack Developer
+DAMA VENKATA VIGNESH
+Systems & DevOps
+GONDU DIVITHA
+Backend Developer
+DEVARLA SOWMYA RAI
+Data & Research Lead
+PROJECT MENTORSHIP
+• 
+Faculty Mentor: 
+Dr. Sumathy S — Professor Higher Academic Grade, Department of Information Technology, VIT
+• 
+Guidance Domain: 
+Provides ongoing expert advisory on dataset analysis, machine learning model architectures, and SIH optimization.
+
+=== ppt/slides/slide3.xml ===
+THE VULNERABILITY OF WEATHER OBSERVATIONS
+THE CORE CHALLENGE
+• 
+Data Reliance: 
+Critical weather warning systems rely on real-time AWS data.
+• 
+Harsh Conditions: 
+Harsh environments cause sensor drift and battery degradation.
+• 
+Subtle Faults: 
+Failed sensors broadcast faulty data that passes simple threshold checks.
+• 
+Scale Barrier: 
+Manual quality control is slow; automated real-time checking is required.
+WHY SIMPLE THRESHOLDS FAIL
+• 
+Context Blindness: 
+Static rule engines fail. Real weather events can legitimately trigger extreme readings.
+• 
+Complex Anomalies: 
+Sensors can fail through frozen values, gradual drift, or spikes while remaining within limits.
+• 
+Unified Checks: 
+Observations require validation across temporal, spatial, and multivariate attributes.
+SPIKE
+FROZEN
+DRIFT
+COMM FAILURE
+MULTIVARIATE
+
+=== ppt/slides/slide4.xml ===
+PROPOSED SOLUTION: SYSTEM ARCHITECTURE
+SkyGuard AI establishes a secure, modular monitoring layer that intercepts observations before they reach decision systems.
+1. AWS STREAM
+Continuous data streaming of Temp, Pres, Humidity
+2. QUALITY CHECK
+Validates missing, frozen, & duplicate readings
+3. AI/ML ENGINE
+Isolation Forest + Autoencoder analysis
+4. EXPLAIN & CLASSIFY
+SHAP contribution & root-cause mapping
+5. HEALTH & CORRECT
+Calculates health score & estimates value
+
+=== ppt/slides/slide5.xml ===
+SYSTEM FLOW & DATA PIPELINE
+DATA FLOW PATHWAY
+• 
+Ingestion: 
+Sensors transmit parameters (Temp, Hum, Pres) via JSON streams.
+• 
+Quality Gateway: 
+Deterministic validation flags immediate range errors and timeouts.
+• 
+Parallel Inference: 
+Concurrent execution of Isolation Forest (ML) and Autoencoder (DL).
+• 
+Decision Fusion: 
+Scores are fused dynamically using a confidence weighted formula.
+• 
+Explainability: 
+SHAP extracts features driving the anomaly; root cause is categorized.
+• 
+Broadcast: 
+Downstream endpoints receive alerts alongside an imputed fallback value.
+SENSOR HEALTH & IMPUTATION LOOP
+• 
+Health Score: 
+Continuous 0-100 rating tracked for every physical sensor.
+• 
+Degradation: 
+Persistent anomalies and data drops degrade the score over time.
+• 
+Proactive Alerts: 
+Scores below 50 trigger alerts for physical maintenance.
+• 
+Data Recovery: 
+If compromised, system estimates replacement readings dynamically.
+NORMAL (100-80)
+Full reliability.
+Data is passed directly.
+DRIFT (79-50)
+Warning state.
+Minor drift flagged.
+FAIL (49-0)
+Critical state.
+AI Imputation active.
+
+=== ppt/slides/slide6.xml ===
+CONCEPT 1: MULTIVARIATE ANALYSIS
+PHYSICS-BASED VALIDATION
+• 
+Inter-variable Links: 
+Atmospheric parameters (temperature, pressure, relative humidity) are physically correlated and follow meteorological laws.
+• 
+Univariate Blindspot: 
+Univariate systems only analyze one sensor at a time. They miss joint relationships where values are normal individually but impossible in combination.
+• 
+Correlation Checking: 
+SkyGuard models the correlation matrix. If pressure drops sharply while temperature climbs during high humidity, it flags a multivariate anomaly.
+• 
+False Alarm Reduction: 
+This physics-aligned modeling prevents extreme, genuine weather anomalies from being falsely categorized as equipment failure.
+COMPARISON MATRIX
+{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}
+SENSOR
+UNIVARIATE CHECK
+SKYGUARD SYSTEM
+Temp (35°C)
+✔ PASS (Limit 45°)
+✔ Validated
+Hum (98%)
+✔ PASS (Limit 100%)
+✔ Validated
+Combined
+✔ PASS (Individual OK)
+✘ FLAG: Joint Anomaly
+
+=== ppt/slides/slide7.xml ===
+CONCEPT 2: ISOLATION FOREST
+ISOLATING ANOMALIES
+• 
+Algorithm Design: 
+Isolation Forest is an unsupervised algorithm that isolates anomalies instead of profiling normal data points.
+• 
+Random Partitioning: 
+The dataset is recursively partitioned by randomly selecting a feature and a split value.
+• 
+Path Length Principle: 
+Anomalies require far fewer partitions (shorter path lengths) to isolate because they lie away from dense clusters.
+• 
+Performance Benefit: 
+Provides immediate, low-latency detection of sharp sensor spikes and sudden out-of-bounds readings.
+ISOLATION FOREST MECHANISM
+Root
+A
+N1
+N2
+N3
+N4
+N5
+Anomaly:
+Short Path
+(1 Split)
+Normal:
+Deep Path
+(4+ Splits)
+
+=== ppt/slides/slide8.xml ===
+CONCEPT 3: AUTOENCODER RECONSTRUCTION
+RECONSTRUCTION-BASED DETECTION
+• 
+Core Model: 
+A neural network consisting of an Encoder (data compression) and a Decoder (data reconstruction).
+• 
+Training Paradigm: 
+The model is trained entirely on historical, clean observation streams (normal weather patterns).
+• 
+Anomaly Metric: 
+When presented with normal readings, the reconstruction error is low. If readings contain anomalies (e.g. sensor drift), the error spikes.
+• 
+Primary Use Case: 
+Highly effective at identifying gradual sensor degradation and long-term calibration drift.
+AUTOENCODER ARCHITECTURE
+Temp
+Pres
+Hum
+Latent
+Temp'
+Pres'
+Hum'
+ENCODER
+DECODER
+COMPARE INPUT VS RECONSTRUCTED OUTPUT = RECONSTRUCTION ERROR
+
+=== ppt/slides/slide9.xml ===
+EXPLAINABILITY & ANOMALY DIAGNOSIS
+SHAP EXPLAINABILITY
+• 
+Transparency: 
+Evaluators favor systems that are not 'black boxes'. SkyGuard integrates SHAP local contribution values.
+• 
+Feature Attribution: 
+SHAP quantifies the exact contribution of each sensor parameter (e.g. Temp, Humidity) toward the final anomaly classification.
+• 
+Auditable Output: 
+Operators can view the specific physical evidence that led the machine learning model to raise an alert.
+ROOT CAUSE CLASSIFIER
+• 
+Diagnosis: 
+Auxiliary network maps feature contributions to failure categories.
+• 
+Root Causes: 
+Classifies anomalies into spikes, frozen values, drift, or comm drops.
+• 
+Actionable: 
+Provides maintenance teams with direct repair suggestions.
+SHAP FEATURE ATTRIBUTION ANALYSIS:
+Temperature Contribution: 78% (Primary Driver)
+Humidity Contribution: 15%
+Pressure Contribution: 7%
+
+=== ppt/slides/slide10.xml ===
+TECHNICAL FEASIBILITY & STACK
+A modern, modular, production-ready stack using established frameworks for rapid scaling.
+BACKEND APIS
+• 
+Python & FastAPI framework
+• 
+High performance asynchronous streaming
+• 
+Docker containerization for Cloud Run
+AI & ML ENGINES
+• 
+Scikit-learn (Isolation Forest)
+• 
+PyTorch (Neural Network Autoencoder)
+• 
+SHAP explainability engine
+STORAGE & PLOTTING
+• 
+PostgreSQL (Observations database)
+• 
+Plotly library for real-time charting
+• 
+Structured audit logging for events
+DEPLOYMENT & EDGE
+• 
+AWS EC2 scalable host
+• 
+Docker container images
+• 
+ESP32 microchip edge gateway compatibility
+
+=== ppt/slides/slide11.xml ===
+OPERATIONAL OUTCOMES & IMPACT
+KEY PERFORMANCE TARGETS
+≥ 90%
+Target F1-Score across all injected anomaly scenarios.
+< 2 Sec
+Target end-to-end alert latency per new AWS stream observation.
+100%
+Alert transparency with confidence score & evidence.
+STRATEGIC IMPACT
+• 
+Trustworthy Weather Feed: 
+Guarantees reliable feed for weather forecasts, disaster prevention systems, and MoES storage.
+• 
+Data Stream Continuity: 
+Rather than discarding anomalous signals, our self-healing layer reconstructs missing segments to prevent observations gaps.
+• 
+Predictive Maintenance: 
+Detects drift and frozen states early, allowing technicians to resolve issues before outright hardware failure occurs.
+• 
+Operational Efficiency: 
+Prevents costly cloud operations through lightweight local feature-extraction and asynchronous API stream processing.
+
+=== ppt/slides/slide12.xml ===
+PROTOTYPE BUDGET & CONCLUSION
+ESTIMATED PROTOTYPE BUDGET
+{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}
+COMPONENT
+PURPOSE
+COST (INR)
+Cloud/Hosting
+Compute & Database
+8,000
+Edge Hardware
+ESP32 + sensor kit
+6,000
+Testing/Data
+Anomaly injection tests
+7,500
+Software Tools
+Domain & Dashboard utilities
+2,500
+Contingency
+Testing adjustments
+2,000
+TOTAL BUDGET
+Full software prototype MVP
+26,000
+SUMMARY & STRATEGIC PITCH
+• 
+SIH-Aligned: 
+Directly aligns with MoES and IMD requirements under SIH26073.
+• 
+Novel Tech: 
+Combines Isolation Forest and Autoencoders with transparent SHAP explanations.
+• 
+Low Compute: 
+Asynchronous API structure handles high-volume streams at low cost.
+• 
+Ready to Deploy: 
+Delivers a complete, trustworthy pathway for clean data feeds.
+DEVELOPED BY TEAM BINARY MINDS
+

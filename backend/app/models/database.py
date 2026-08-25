@@ -162,24 +162,45 @@ class SupabaseDB:
             "Content-Type": "application/json",
             "Prefer": "return=representation"
         }
-        self.client: Optional[httpx.AsyncClient] = None
+        limits = httpx.Limits(max_keepalive_connections=30, max_connections=100, keepalive_expiry=120.0)
+        self.client = httpx.AsyncClient(timeout=15.0, limits=limits)
 
     async def get_client(self) -> httpx.AsyncClient:
         if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(timeout=30.0)
+            limits = httpx.Limits(max_keepalive_connections=30, max_connections=100, keepalive_expiry=120.0)
+            self.client = httpx.AsyncClient(timeout=15.0, limits=limits)
         return self.client
 
     async def close(self):
         if self.client and not self.client.is_closed:
             await self.client.aclose()
 
-    async def select(self, table: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    async def select(self, table: str, params: Optional[Dict[str, Any]] = None, select_fields: Optional[str] = None) -> List[Dict[str, Any]]:
         client = await self.get_client()
         url = f"{self.base_url}/{table}"
-        response = await client.get(url, headers=self.headers, params=params or {})
+        p = dict(params or {})
+        if select_fields:
+            p["select"] = select_fields
+        response = await client.get(url, headers=self.headers, params=p)
         if response.status_code >= 400:
             raise RuntimeError(f"Supabase GET {table} failed: {response.status_code} {response.text}")
         return response.json()
+
+    async def count(self, table: str, params: Optional[Dict[str, Any]] = None) -> int:
+        client = await self.get_client()
+        url = f"{self.base_url}/{table}"
+        headers = dict(self.headers)
+        headers["Prefer"] = "count=exact"
+        p = dict(params or {})
+        p["limit"] = 0
+        response = await client.get(url, headers=headers, params=p)
+        if "content-range" in response.headers:
+            cr = response.headers["content-range"]
+            if "/" in cr:
+                total = cr.split("/")[-1]
+                if total.isdigit():
+                    return int(total)
+        return 0
 
     async def insert(self, table: str, data: Any, on_conflict: Optional[str] = None) -> List[Dict[str, Any]]:
         client = await self.get_client()

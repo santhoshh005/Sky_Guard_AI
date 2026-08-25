@@ -1,7 +1,4 @@
-"""Anomaly query endpoints for SkyGuard AI.
-Implements GET /anomalies and GET /anomalies/{id}.
-Specified in /docs/HANDOFF.md §8.3.
-"""
+import asyncio
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
@@ -13,6 +10,7 @@ from app.models.schemas import (
     AnomalyScoreDetail,
     CorrectedValueSchema,
 )
+from app.routers.observations import station_id_cache
 
 router = APIRouter(prefix="/anomalies", tags=["Anomalies"])
 
@@ -31,6 +29,8 @@ async def list_anomalies(
     params: Dict[str, Any] = {
         "is_anomaly": "eq.true",
         "order": "scored_at.desc",
+        "limit": limit,
+        "offset": (page - 1) * limit,
     }
     if severity:
         params["severity"] = f"eq.{severity}"
@@ -41,27 +41,32 @@ async def list_anomalies(
     if to_date:
         params["scored_at"] = f"lte.{to_date}"
 
-    anomaly_scores = await db_client.select("anomaly_scores", params=params)
+    # Query paginated anomaly scores and total count in parallel
+    count_params = {k: v for k, v in params.items() if k not in ["limit", "offset", "order"]}
+    scores_task = db_client.select("anomaly_scores", params=params)
+    count_task = db_client.count("anomaly_scores", params=count_params)
 
-    # Fetch observation details for station mapping
-    obs_ids = [a["observation_id"] for a in anomaly_scores]
+    anomaly_scores, total_count = await asyncio.gather(scores_task, count_task)
+
+    # Fetch observation details for only the paginated slice in parallel
+    obs_ids = list({a["observation_id"] for a in anomaly_scores if a.get("observation_id")})
     obs_map = {}
     if obs_ids:
-        # Fetch stations for names
-        stations = await db_client.select("stations")
-        stn_map = {s["id"]: s for s in stations}
-
-        # Query observations in batch
-        for obs_id in obs_ids:
-            res = await db_client.select("observations", params={"id": f"eq.{obs_id}", "limit": 1})
-            if res:
-                o = res[0]
-                stn = stn_map.get(o["station_id"], {})
-                obs_map[obs_id] = {
-                    "station_id": o["station_id"],
-                    "station_code": stn.get("station_code", "UNKNOWN"),
-                    "station_name": stn.get("name", "Unknown Station"),
-                    "observed_at": o["observed_at"],
+        obs_tasks = [
+            db_client.select("observations", params={"id": f"eq.{oid}", "limit": 1})
+            for oid in obs_ids
+        ]
+        obs_results = await asyncio.gather(*obs_tasks)
+        for res_list in obs_results:
+            if res_list:
+                o = res_list[0]
+                s_id = o.get("station_id")
+                stn = station_id_cache.get(s_id, {})
+                obs_map[o["id"]] = {
+                    "station_id": s_id,
+                    "station_code": stn.get("station_code", "AWS"),
+                    "station_name": stn.get("name", "Automatic Weather Station"),
+                    "observed_at": o.get("observed_at"),
                 }
 
     items: List[AnomalyListItem] = []
@@ -75,20 +80,16 @@ async def list_anomalies(
             station_name=obs_info.get("station_name"),
             observed_at=obs_info.get("observed_at", a["scored_at"]),
             fused_score=a["fused_score"],
+            confidence=a.get("confidence", 0.5),
             severity=a["severity"],
             root_cause=a.get("root_cause"),
-            confidence=a["confidence"],
             explanation=a.get("explanation"),
-            scored_at=a.get("scored_at"),
+            scored_at=a["scored_at"],
         ))
 
-    total = len(items)
-    start_idx = (page - 1) * limit
-    paginated = items[start_idx : start_idx + limit]
-
     return AnomalyListResponse(
-        anomalies=paginated,
-        total=total,
+        anomalies=items,
+        total=total_count,
         page=page,
     )
 

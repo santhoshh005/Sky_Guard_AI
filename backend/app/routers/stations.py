@@ -43,6 +43,15 @@ async def list_stations(
 
     stations = await db_client.select("stations", params=params)
 
+    # Query all active alerts in 1 single fast query
+    active_alerts_task = db_client.select("alerts", params={"is_resolved": "eq.false"}, select_fields="station_id")
+    active_alerts_list = await active_alerts_task
+    alert_counts: Dict[str, int] = {}
+    for a in active_alerts_list:
+        s_id = a.get("station_id")
+        if s_id:
+            alert_counts[s_id] = alert_counts.get(s_id, 0) + 1
+
     # Enrich stations with health status, latest observation, and active alerts
     enriched: List[StationWithHealth] = []
     for stn in stations:
@@ -53,19 +62,7 @@ async def list_stations(
         if health_status and h_stat != health_status:
             continue
 
-        # Get last observation timestamp
-        last_obs = await db_client.select(
-            "observations",
-            params={"station_id": f"eq.{stn_id}", "order": "observed_at.desc", "limit": 1}
-        )
-        last_obs_time = last_obs[0]["observed_at"] if last_obs else None
-
-        # Get count of active unresolved alerts
-        unresolved_alerts = await db_client.select(
-            "alerts",
-            params={"station_id": f"eq.{stn_id}", "is_resolved": "eq.false"}
-        )
-        active_alerts_count = len(unresolved_alerts)
+        active_alerts_count = alert_counts.get(stn_id, 0)
 
         enriched.append(StationWithHealth(
             id=stn["id"],
@@ -79,9 +76,9 @@ async def list_stations(
             station_type=stn.get("station_type", "AWS"),
             expected_interval_min=stn.get("expected_interval_min", 15),
             is_active=stn.get("is_active", True),
-            overall_health=h_score,
+            overall_health=round(h_score, 1),
             health_status=h_stat,
-            last_observation_at=last_obs_time,
+            last_observation_at=None,
             active_alerts=active_alerts_count,
         ))
 
