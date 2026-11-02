@@ -88,7 +88,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 API Documentation will be live at: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-### 3. Frontend Setup
+### 4. Frontend Setup
 ```bash
 # In a new terminal, navigate to frontend directory
 cd frontend

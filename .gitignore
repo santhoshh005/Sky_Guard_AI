@@ -15,3 +15,9 @@ ml/models/*.h5
 ml/models/*.pt
 .DS_Store
 *.log
+
+# Presentation and temporary files
+*.pptx
+~$*
+*_extracted_text.txt
+
