@@ -84,7 +84,7 @@ export default function AnomalyDetail() {
             <StatusBadge status={anomaly.severity} size="lg" />
           </div>
           <span className="text-xs font-mono font-bold text-cyan-400 bg-[#050b1a] px-3 py-1 rounded-lg border border-cyan-500/30">
-            Observation ID: {anomaly.id ? anomaly.id.slice(0, 8) : '--'}
+            Anomaly ID: {anomaly.id ? anomaly.id.slice(0, 8) : '--'}
           </span>
         </div>
       </div>
@@ -97,7 +97,7 @@ export default function AnomalyDetail() {
           </div>
           <div>
             <h3 className="text-xs font-bold text-cyan-300 uppercase tracking-widest font-mono">
-              AI Root-Cause Diagnostic Report (§5 & §7.3)
+              AI Root-Cause Diagnostic Report
             </h3>
             <p className="text-sm sm:text-base text-slate-100 mt-1 font-medium leading-relaxed font-sans">
               {anomaly.explanation || 'Anomaly detected based on combined statistical, spatial, and structural deviations.'}
@@ -210,7 +210,7 @@ export default function AnomalyDetail() {
           <div>
             <h3 className="text-sm font-bold uppercase tracking-wider text-white mb-1 flex items-center gap-2 font-mono">
               <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              <span>Telemetry Value Estimation (§6)</span>
+              <span>Telemetry Value Estimation</span>
             </h3>
             <p className="text-xs text-slate-400 mb-4 font-mono">
               Estimated physical value replacing faulty reading (raw values preserved).

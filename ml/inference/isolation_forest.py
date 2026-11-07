@@ -1,21 +1,33 @@
 """Isolation Forest inference and SHAP explainability module.
 Implements scoring and TreeSHAP feature contributions specified in /docs/HANDOFF.md §3.2 & §7.
 """
-import os
+import logging
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
+
 import numpy as np
 import shap
 
+from app.config import settings
 from app.services.feature_engineer import FEATURE_NAMES, PARAMETERS, extract_base_param
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
+logger = logging.getLogger("skyguard.ml")
+
+# Logistic calibration of sklearn's decision_function (0 = contamination boundary,
+# negative = outlier). Steepness chosen so typical inliers score < 0.1.
+IF_SIGMOID_STEEPNESS = 25.0
+
+
+def calibrate_if_score(raw_decision: float) -> float:
+    """Map IsolationForest.decision_function output to an anomaly probability in [0, 1]."""
+    z = float(np.clip(raw_decision * IF_SIGMOID_STEEPNESS, -50.0, 50.0))
+    return float(1.0 / (1.0 + np.exp(z)))
 
 
 class IsolationForestInference:
     def __init__(self, model_dir: Optional[Path] = None):
-        self.model_dir = model_dir or MODEL_DIR
+        self.model_dir = Path(model_dir or settings.ML_MODEL_DIR)
         self.model = None
         self.scaler = None
         self.explainer = None
@@ -33,7 +45,13 @@ class IsolationForestInference:
             try:
                 self.explainer = shap.TreeExplainer(self.model)
             except Exception as e:
-                print(f"[WARN] Failed to initialize TreeExplainer: {e}")
+                logger.warning("Failed to initialize TreeExplainer: %s", e)
+        else:
+            logger.warning("Isolation Forest artifacts not found in %s; IF channel disabled.", self.model_dir)
+
+    @property
+    def loaded(self) -> bool:
+        return self.model is not None and self.scaler is not None
 
     def score(self, feature_vector: np.ndarray) -> float:
         """
@@ -43,12 +61,13 @@ class IsolationForestInference:
         if self.model is None or self.scaler is None:
             return 0.0
 
-        vec_2d = feature_vector.reshape(1, -1)
-        scaled_vec = self.scaler.transform(vec_2d)
+        scaled_vec = self._scale(feature_vector)
         raw_score = float(self.model.decision_function(scaled_vec)[0])
-        # Formula from §3.2: (1 - raw_score) / 2 clamped to [0, 1]
-        if_score = max(0.0, min(1.0, (1.0 - raw_score) / 2.0))
-        return float(if_score)
+        return calibrate_if_score(raw_score)
+
+    def _scale(self, feature_vector: np.ndarray) -> np.ndarray:
+        vec_2d = np.nan_to_num(feature_vector.reshape(1, -1), nan=0.0, posinf=0.0, neginf=0.0)
+        return self.scaler.transform(vec_2d)
 
     def explain(self, feature_vector: np.ndarray) -> Dict[str, Any]:
         """
@@ -57,8 +76,7 @@ class IsolationForestInference:
         if self.model is None or self.scaler is None:
             return {"top_features": [], "parameter_contributions": {p: 0.0 for p in PARAMETERS}}
 
-        vec_2d = feature_vector.reshape(1, -1)
-        scaled_vec = self.scaler.transform(vec_2d)
+        scaled_vec = self._scale(feature_vector)
 
         shap_matrix = None
         if self.explainer is not None:
@@ -69,7 +87,7 @@ class IsolationForestInference:
                 else:
                     shap_matrix = shap_vals
             except Exception as e:
-                pass
+                logger.debug("SHAP computation failed, using deviation fallback: %s", e)
 
         # Fallback to feature deviation attribution if SHAP explainer unavailable
         if shap_matrix is None or len(shap_matrix) == 0:

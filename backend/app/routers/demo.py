@@ -5,16 +5,18 @@ Specified in /docs/HANDOFF.md §8.7, §9.2, §14.4.
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.config import settings
 from app.models.database import db_client
+from app.services.feature_engineer import parse_ts
 from app.models.schemas import (
     DemoGenerateRequest,
     DemoGenerateResponse,
     DemoInjectRequest,
     DemoInjectResponse,
-    PARAMETERS,
 )
+from app.routers.deps import require_api_key
 from app.routers.observations import get_station_by_id, process_observation_pipeline
 from app.services.data_generator import (
     create_drift_observations,
@@ -24,7 +26,26 @@ from app.services.data_generator import (
     generate_time_series,
 )
 
-router = APIRouter(prefix="/demo", tags=["Demo Controls"])
+router = APIRouter(prefix="/demo", tags=["Demo Controls"], dependencies=[Depends(require_api_key)])
+
+
+async def _sequence_start(station_id: str, now: datetime, interval_min: int, count: int) -> datetime:
+    """Start a multi-reading fault right after the station's latest reading.
+
+    Back-dating it into the past would interleave the injected readings with real ones,
+    which breaks consecutive-reading signatures such as a frozen run.
+    """
+    start = now - timedelta(minutes=interval_min * (count - 1))
+    latest = await db_client.select(
+        "observations",
+        params={"station_id": f"eq.{station_id}", "order": "observed_at.desc", "limit": 1},
+        select_fields="observed_at",
+    )
+    if latest:
+        last = parse_ts(latest[0]["observed_at"])
+        if last and last + timedelta(minutes=interval_min) > start:
+            start = last + timedelta(minutes=interval_min)
+    return start
 
 
 @router.post("/inject-anomaly", response_model=DemoInjectResponse)
@@ -39,12 +60,12 @@ async def inject_synthetic_anomaly(payload: DemoInjectRequest):
 
     station_code = station["station_code"]
     elevation_m = station.get("elevation_m") or 0.0
-    interval_min = station.get("expected_interval_min", 15)
+    interval_min = station.get("expected_interval_min") or 15
     now = datetime.now(timezone.utc)
 
-    anomaly_type = payload.anomaly_type.lower()
-    target_params = payload.parameters or [random.choice(["temperature", "humidity", "pressure"])]
-    magnitude = payload.magnitude or 3.0
+    anomaly_type = payload.anomaly_type
+    target_params = list(payload.parameters or [random.choice(["temperature", "humidity", "pressure"])])
+    magnitude = payload.magnitude
     duration_min = payload.duration_minutes or payload.duration_min or 30
 
     injected_obs_ids: List[str] = []
@@ -69,7 +90,7 @@ async def inject_synthetic_anomaly(payload: DemoInjectRequest):
     # --------------------------------------------------------------------------
     elif anomaly_type == "frozen":
         count = max(4, duration_min // interval_min)
-        start_t = now - timedelta(minutes=interval_min * (count - 1))
+        start_t = await _sequence_start(station["id"], now, interval_min, count)
         frozen_series = create_frozen_observations(
             station_code=station_code,
             start_time=start_t,
@@ -88,7 +109,7 @@ async def inject_synthetic_anomaly(payload: DemoInjectRequest):
     # --------------------------------------------------------------------------
     elif anomaly_type == "drift":
         count = max(4, duration_min // interval_min)
-        start_t = now - timedelta(minutes=interval_min * (count - 1))
+        start_t = await _sequence_start(station["id"], now, interval_min, count)
         drift_series = create_drift_observations(
             station_code=station_code,
             start_time=start_t,
@@ -166,10 +187,10 @@ async def generate_synthetic_normal_data(payload: DemoGenerateRequest):
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
 
-    hours = payload.hours or ((payload.days or 1) * 24)
+    hours = min(payload.hours or ((payload.days or 1) * 24), settings.MAX_DEMO_GENERATE_HOURS)
     station_code = station["station_code"]
     elevation_m = station.get("elevation_m") or 0.0
-    interval_min = payload.interval_min or station.get("expected_interval_min", 15)
+    interval_min = payload.interval_min or station.get("expected_interval_min") or 15
     num_obs = int((hours * 60) / interval_min)
 
     now = datetime.now(timezone.utc)
@@ -184,7 +205,11 @@ async def generate_synthetic_normal_data(payload: DemoGenerateRequest):
     )
 
     for obs in series:
-        await process_observation_pipeline(obs)
+        try:
+            await process_observation_pipeline(obs)
+        except HTTPException as exc:
+            if exc.status_code != 409:  # skip timestamps that already exist
+                raise
 
     return DemoGenerateResponse(
         observation_count=len(series),

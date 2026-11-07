@@ -2,12 +2,31 @@
 Tracks per-parameter reliability score [0, 100] with degradation, recovery, and streak acceleration.
 Specified in /docs/HANDOFF.md §4, §14.1, §14.2.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
+
 import numpy as np
 
-from app.services.feature_engineer import PARAMETERS
+from app.config import settings
+from app.services.feature_engineer import PARAMETERS, parse_ts
+
+# SHAP share above which a parameter is considered a dominant driver of an anomaly.
+# Shares are normalised to sum to 1 over 7 parameters, so the spec's 0.15 (~1/7) would
+# flag 2-3 innocent sensors on every reading.
+SHAP_DOMINANT_SHARE = 0.35
+# A long reporting outage says little about sensor quality; cap its decay per gap.
+MAX_GAP_DECAY = 10.0
+
+
+def status_for_score(score: float) -> str:
+    if score < settings.HEALTH_CRITICAL_THRESHOLD:
+        return "sensor_critical"
+    if score < settings.HEALTH_MAINTENANCE_THRESHOLD:
+        return "maintenance_recommended"
+    if score < 70.0:
+        return "degraded"
+    return "healthy"
 
 
 @dataclass
@@ -25,13 +44,7 @@ class SensorHealthState:
         }
 
     def get_status(self) -> str:
-        if self.health_score < 15.0:
-            return "sensor_critical"
-        if self.health_score < 40.0:
-            return "maintenance_recommended"
-        if self.health_score < 70.0:
-            return "degraded"
-        return "healthy"
+        return status_for_score(self.health_score)
 
 
 class HealthScorer:
@@ -47,26 +60,36 @@ class HealthScorer:
             self.states[key] = SensorHealthState()
         return self.states[key]
 
+    def restore_state(
+        self, station_id: str, parameter: str, health_score: float, anomaly_streak: int = 0,
+        last_updated: Optional[datetime] = None,
+    ) -> None:
+        """Rehydrate persisted state (e.g. latest sensor_health_history row) after a restart."""
+        self.states[(station_id, parameter)] = SensorHealthState(
+            health_score=float(max(0.0, min(100.0, health_score))),
+            anomaly_streak=int(anomaly_streak or 0),
+            last_updated=parse_ts(last_updated),
+        )
+
     @staticmethod
-    def get_flagged_parameters(qc_flags: Dict[str, Any], shap_values: Dict[str, Any]) -> Set[str]:
+    def get_flagged_parameters(
+        qc_flags: Dict[str, Any],
+        shap_values: Dict[str, Any],
+        is_anomaly: bool = True,
+        anomalous_params: Optional[Iterable[str]] = None,
+    ) -> Set[str]:
+        """Parameters to penalise for this observation.
+
+        (a) any per-parameter QC flag (deterministic evidence), always;
+        (b) only when the observation is anomalous: the root-cause parameters and any
+            parameter whose normalised SHAP share is dominant (>= SHAP_DOMINANT_SHARE).
         """
-        Derive flagged anomalous parameters per §14.1:
-        Union of QC-flagged parameters + SHAP parameters with normalized contribution >= 0.15.
-        """
-        flagged = set()
-
-        # (a) QC flags
-        for param in PARAMETERS:
-            flags = qc_flags.get(param, [])
-            if flags and len(flags) > 0:
-                flagged.add(param)
-
-        # (b) SHAP contributions >= 0.15
-        contributions = shap_values.get("parameter_contributions", {})
-        for param, contrib in contributions.items():
-            if contrib >= 0.15:
-                flagged.add(param)
-
+        flagged = {p for p in PARAMETERS if qc_flags.get(p)}
+        if is_anomaly:
+            flagged.update(p for p in (anomalous_params or []) if p in PARAMETERS)
+            for param, contrib in shap_values.get("parameter_contributions", {}).items():
+                if param in PARAMETERS and contrib >= SHAP_DOMINANT_SHARE:
+                    flagged.add(param)
         return flagged
 
     def update_sensor_health(
@@ -77,7 +100,9 @@ class HealthScorer:
         shap_values: Dict[str, Any],
         ae_param_errors: Optional[Dict[str, float]] = None,
         is_drifting_map: Optional[Dict[str, bool]] = None,
-        expected_interval_min: int = 15
+        expected_interval_min: int = 15,
+        is_anomaly: bool = True,
+        anomalous_params: Optional[Iterable[str]] = None,
     ) -> Dict[str, Tuple[SensorHealthState, str, Optional[str]]]:
         """
         Update health for all 7 parameters for a given station.
@@ -85,12 +110,8 @@ class HealthScorer:
         Returns:
             Dict mapping param -> (state, status, alert_type_to_create_or_None)
         """
-        flagged_params = self.get_flagged_parameters(qc_flags, shap_values)
-        obs_time = observation.get("observed_at")
-        if isinstance(obs_time, str):
-            obs_time = datetime.fromisoformat(obs_time.replace("Z", "+00:00"))
-        elif obs_time is None:
-            obs_time = datetime.now(timezone.utc)
+        flagged_params = self.get_flagged_parameters(qc_flags, shap_values, is_anomaly, anomalous_params)
+        obs_time = parse_ts(observation.get("observed_at")) or datetime.now(timezone.utc)
 
         results: Dict[str, Tuple[SensorHealthState, str, Optional[str]]] = {}
 
@@ -105,7 +126,7 @@ class HealthScorer:
                 elapsed_min = (obs_time - state.last_updated).total_seconds() / 60.0
                 if elapsed_min > 2.0 * expected_interval_min:
                     missed = int(elapsed_min / expected_interval_min) - 1
-                    state.health_score = max(0.0, state.health_score - 1.0 * missed)
+                    state.health_score = max(0.0, state.health_score - min(MAX_GAP_DECAY, 1.0 * missed))
 
             # 2. Penalty or Recovery
             if is_anomalous:
@@ -126,7 +147,8 @@ class HealthScorer:
                 state.health_score = min(100.0, state.health_score + 0.5)
                 state.anomaly_streak = 0
 
-            state.last_updated = obs_time
+            if state.last_updated is None or obs_time > state.last_updated:
+                state.last_updated = obs_time
             new_status = state.get_status()
 
             # 3. Check for health alert transition
@@ -144,14 +166,4 @@ class HealthScorer:
         """Compute average health score across all 7 parameters for a station."""
         scores = [self.get_state(station_id, p).health_score for p in PARAMETERS]
         avg_score = float(np.mean(scores)) if scores else 100.0
-        
-        if avg_score < 15.0:
-            status = "sensor_critical"
-        elif avg_score < 40.0:
-            status = "maintenance_recommended"
-        elif avg_score < 70.0:
-            status = "degraded"
-        else:
-            status = "healthy"
-            
-        return round(avg_score, 2), status
+        return round(avg_score, 2), status_for_score(avg_score)

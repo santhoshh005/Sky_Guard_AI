@@ -1,16 +1,13 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-sqlalchemy[asyncio]>=2.0.0
-asyncpg>=0.29.0
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-python-dotenv>=1.0.0
-httpx>=0.25.0
-numpy>=1.26.0
-pandas>=2.1.0
-scikit-learn>=1.3.0
-tensorflow>=2.15.0
-shap>=0.43.0
-scipy>=1.11.0
-websockets>=12.0
-alembic>=1.13.0
+# Runtime dependencies (tested with Python 3.12-3.14).
+# scikit-learn is pinned: the pickled models in ml/models must be loaded with the
+# version that trained them. Retrain (python -m ml.training.train_models) after upgrading it.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+pydantic>=2.7,<3
+pydantic-settings>=2.3
+httpx>=0.27,<1.0
+numpy>=2.0
+pandas>=2.2
+scikit-learn==1.9.0
+shap>=0.46
+scipy>=1.13

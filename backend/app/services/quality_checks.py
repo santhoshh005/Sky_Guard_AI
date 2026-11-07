@@ -1,30 +1,93 @@
-"""Deterministic Quality Checks (QC) Service for SkyGuard AI.
-Implements physical bounds, frozen sensor, spike deviation, and timestamp gap checks.
-Specified in /docs/HANDOFF.md §3.1.
+"""Deterministic Quality Checks (QC) for SkyGuard AI.
+
+Checks per parameter: missing, physical range, frozen (stuck) sensor and spike (step test);
+plus a station-level timestamp-gap check.
+
+QC score
+--------
+Each flag carries a severity weight and the score is a noisy-OR of the raised flags::
+
+    qc_score = 1 - prod(1 - w_flag)
+
+A single hard physical violation (out-of-range value, stuck sensor, step spike) therefore
+dominates the channel instead of being diluted to 1/29 as in a plain flag count.
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 
-PARAMETERS = [
-    "temperature",
-    "humidity",
-    "pressure",
-    "wind_speed",
-    "wind_direction",
-    "rainfall",
-    "solar_radiation",
-]
+from app.services.feature_engineer import PARAMETERS, is_valid_number, local_solar_hour, param_delta, parse_ts
 
 BOUNDS: Dict[str, Dict[str, float]] = {
     "temperature": {"min": -50.0, "max": 60.0},
     "humidity": {"min": 0.0, "max": 100.0},
-    "pressure": {"min": 870.0, "max": 1084.0},
+    "pressure": {"min": 500.0, "max": 1084.0},  # 500 hPa admits high-altitude AWS (~5.5 km)
     "wind_speed": {"min": 0.0, "max": 120.0},
     "wind_direction": {"min": 0.0, "max": 360.0},
     "rainfall": {"min": 0.0, "max": 500.0},
     "solar_radiation": {"min": 0.0, "max": 1500.0},
 }
+
+# Severity weight per QC flag (probability-like evidence that the reading is faulty)
+FLAG_WEIGHTS: Dict[str, float] = {
+    "range": 1.0,
+    "frozen": 0.9,
+    "spike": 0.9,
+    "missing": 0.6,
+    "timestamp_gap": 0.5,
+}
+
+# Flags that are deterministic proof of a faulty reading on their own
+HARD_FLAGS = frozenset({"range", "frozen", "spike"})
+
+# Minimum plausible 15-minute step for a genuine weather change. A step must exceed both this
+# and 5x the station's recent robust step-scale to count as a spike, so real fronts and
+# thunderstorm cooling are not flagged.
+MIN_SPIKE_STEP: Dict[str, float] = {
+    "temperature": 4.0,
+    "humidity": 15.0,
+    "pressure": 2.0,
+    "wind_speed": 10.0,
+    "solar_radiation": 800.0,
+}
+# Rainfall is intermittent and wind direction legitimately swings, so no step test for them.
+SPIKE_EXEMPT = frozenset({"rainfall", "wind_direction"})
+
+FROZEN_RUN = 4  # identical consecutive readings (current + 3 previous)
+DAYLIGHT_START, DAYLIGHT_END = 7.5, 16.5  # local solar hours with certain daylight
+
+
+def _is_natural_constant(param: str, val: float, obs: Dict[str, Any], solar_hour: float) -> bool:
+    """Constant readings that are physically expected and must not be called 'frozen'."""
+    if param == "rainfall" and val == 0.0:
+        return True  # no rain
+    if param == "solar_radiation" and val == 0.0:
+        return not (DAYLIGHT_START <= solar_hour <= DAYLIGHT_END)  # night / twilight
+    if param == "wind_speed" and val == 0.0:
+        return True  # calm
+    if param == "wind_direction" and obs.get("wind_speed") == 0.0:
+        return True  # vane does not move in calm air
+    if param == "humidity" and val >= 99.5:
+        return True  # saturated air (fog / rain)
+    return False
+
+
+def _robust_step_scale(param: str, values: List[float]) -> float:
+    """Robust std (1.4826 * MAD) of consecutive steps in the recent window."""
+    if len(values) < 3:
+        return 0.0
+    steps = np.diff(np.asarray(values, dtype=float))
+    mad = float(np.median(np.abs(steps - np.median(steps))))
+    return 1.4826 * mad
+
+
+def hard_flagged_params(qc_flags: Dict[str, Any]) -> List[str]:
+    return [p for p in PARAMETERS if HARD_FLAGS.intersection(qc_flags.get(p, []))]
+
+
+def has_hard_flag(qc_flags: Dict[str, Any]) -> bool:
+    return bool(hard_flagged_params(qc_flags))
 
 
 class QualityChecker:
@@ -32,105 +95,77 @@ class QualityChecker:
     def run_checks(
         current_obs: Dict[str, Any],
         recent_history: List[Dict[str, Any]],
-        expected_interval_min: int = 15
-    ) -> Tuple[float, Dict[str, List[str]]]:
-        """
-        Run deterministic quality checks against current observation.
-        
+        expected_interval_min: int = 15,
+        longitude: Optional[float] = None,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Run deterministic quality checks.
+
         Args:
-            current_obs: Dict with parameter readings and 'observed_at'
-            recent_history: List of past observations sorted by observed_at asc
-            expected_interval_min: Expected reporting interval in minutes
-            
+            current_obs: parameter readings plus ``observed_at``
+            recent_history: past observations sorted by ``observed_at`` ascending (strictly before current)
+            expected_interval_min: station reporting interval
+            longitude: station longitude for local solar time (optional)
+
         Returns:
-            Tuple of (qc_score: float [0, 1], qc_flags: Dict[param, List[flags]])
+            ``(qc_score, qc_flags)`` where ``qc_flags`` maps parameter -> list of flags,
+            ``_station`` -> station-level flags, and ``qc_score`` -> the rounded score.
         """
         flags: Dict[str, List[str]] = {p: [] for p in PARAMETERS}
         flags["_station"] = []
 
-        curr_time = current_obs.get("observed_at")
-        if isinstance(curr_time, str):
-            curr_time = datetime.fromisoformat(curr_time.replace("Z", "+00:00"))
+        curr_time = parse_ts(current_obs.get("observed_at"))
+        solar_hour = local_solar_hour(curr_time, longitude) if curr_time else 12.0
+        cutoff_24h = curr_time - timedelta(hours=24) if curr_time else None
 
-        # 1. Per-parameter checks
+        window = [
+            h for h in recent_history
+            if cutoff_24h is None or (parse_ts(h.get("observed_at")) or cutoff_24h) >= cutoff_24h
+        ]
+
         for param in PARAMETERS:
             val = current_obs.get(param)
 
-            # A. MISSING
-            if val is None or (isinstance(val, float) and np.isnan(val)):
+            if not is_valid_number(val):
                 flags[param].append("missing")
-                continue  # Skip other checks if missing
-
+                continue
             val = float(val)
 
-            # B. RANGE
+            # RANGE
             if val < BOUNDS[param]["min"] or val > BOUNDS[param]["max"]:
                 flags[param].append("range")
 
-            # C. FROZEN: >= 4 consecutive identical values
-            # Rainfall == 0 is unconditionally valid (rain absence).
-            # Solar radiation == 0 is ONLY valid at night (outside §9.1 sunrise=6, sunset=18 window).
-            # A solar sensor stuck at 0 during daytime (06:00-18:00) is an active fault and MUST trigger frozen.
-            hour_val = (curr_time.hour + curr_time.minute / 60.0) if curr_time else 12.0
-            is_daytime = 6.0 <= hour_val <= 18.0
-            is_zero_natural = (param == "rainfall" and val == 0.0) or (param == "solar_radiation" and val == 0.0 and not is_daytime)
-
-            if not is_zero_natural:
-                past_values = [
-                    float(h[param])
-                    for h in recent_history[-3:]
-                    if param in h and h[param] is not None and not np.isnan(h[param])
-                ]
-                if len(past_values) == 3 and all(abs(pv - val) < 1e-4 for pv in past_values):
+            # FROZEN: >= 4 consecutive identical values
+            if not _is_natural_constant(param, val, current_obs, solar_hour):
+                past = [h.get(param) for h in recent_history[-(FROZEN_RUN - 1):]]
+                if len(past) == FROZEN_RUN - 1 and all(
+                    is_valid_number(pv) and abs(float(pv) - val) < 1e-4 for pv in past
+                ):
                     flags[param].append("frozen")
 
-            # D. SPIKE: |delta| > 5 * rolling_std_24h
-            if recent_history:
-                prev_obs = recent_history[-1]
-                prev_val = prev_obs.get(param)
-                if prev_val is not None and not np.isnan(prev_val):
-                    delta = abs(val - float(prev_val))
-                    
-                    # 24h rolling std
-                    cutoff_24h = curr_time - timedelta(hours=24)
-                    values_24h = [
-                        float(h[param])
-                        for h in recent_history
-                        if param in h and h[param] is not None and not np.isnan(h[param])
-                    ]
-                    if len(values_24h) >= 4:
-                        rolling_std = float(np.std(values_24h, ddof=1))
-                        # Avoid triggering on near-zero noise floor
-                        min_std_floor = {
-                            "temperature": 0.5,
-                            "humidity": 1.5,
-                            "pressure": 0.4,
-                            "wind_speed": 0.8,
-                            "wind_direction": 5.0,
-                            "rainfall": 2.0,
-                            "solar_radiation": 15.0,
-                        }.get(param, 1.0)
-                        effective_std = max(rolling_std, min_std_floor)
-                        if delta > 5.0 * effective_std:
-                            flags[param].append("spike")
+            # SPIKE: step from the recent local level exceeds max(5 x robust step scale, plausible step)
+            if param not in SPIKE_EXEMPT:
+                values = [float(h[param]) for h in window if is_valid_number(h.get(param))]
+                if len(values) >= 4:
+                    reference = float(np.median(values[-3:]))  # robust to a single preceding spike
+                    step = abs(param_delta(param, val, reference))
+                    threshold = max(5.0 * _robust_step_scale(param, values), MIN_SPIKE_STEP[param])
+                    if step > threshold:
+                        flags[param].append("spike")
 
-        # 2. Station-level timestamp gap check
-        if recent_history:
-            prev_time = recent_history[-1].get("observed_at")
-            if isinstance(prev_time, str):
-                prev_time = datetime.fromisoformat(prev_time.replace("Z", "+00:00"))
+        # Station-level timestamp gap
+        if recent_history and curr_time:
+            prev_time = parse_ts(recent_history[-1].get("observed_at"))
             if prev_time:
-                time_gap_min = (curr_time - prev_time).total_seconds() / 60.0
-                if time_gap_min > 2.0 * expected_interval_min:
+                gap_min = (curr_time - prev_time).total_seconds() / 60.0
+                if gap_min > 2.0 * expected_interval_min:
                     flags["_station"].append("timestamp_gap")
 
-        # 3. Compute QC score [0, 1]
-        total_flags = sum(len(f_list) for f_list in flags.values())
-        total_checks = len(PARAMETERS) * 4 + 1  # 29 checks total
-        qc_score = float(min(1.0, total_flags / total_checks))
+        survival = 1.0
+        for flag_list in flags.values():
+            for flag in flag_list:
+                survival *= 1.0 - FLAG_WEIGHTS.get(flag, 0.5)
+        qc_score = float(min(1.0, max(0.0, 1.0 - survival)))
 
-        # Store score inside flags dict for convenience
-        result_flags = dict(flags)
+        result_flags: Dict[str, Any] = dict(flags)
         result_flags["qc_score"] = round(qc_score, 4)
-
         return qc_score, result_flags

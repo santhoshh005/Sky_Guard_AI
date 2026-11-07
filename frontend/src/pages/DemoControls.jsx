@@ -108,9 +108,9 @@ export default function DemoControls() {
       });
       const elapsed = Math.round(performance.now() - startTime);
 
-      setResult({ ...res, latency_ms: elapsed });
+      const station = STATIONS.find((s) => s.id === stationId);
+      setResult({ ...res, station_label: station ? `${station.name} (${station.id})` : stationId, latency_ms: elapsed });
     } catch (err) {
-      console.error('Injection failed:', err);
       setError(err.message || 'Injection failed. Check server logs.');
     } finally {
       setLoading(false);
@@ -121,15 +121,12 @@ export default function DemoControls() {
     try {
       setGenLoading(true);
       setError(null);
-      await api.generateData({
+      const res = await api.generateData({
         station_ids: [stationId],
         days: 1,
         interval_min: 15,
       });
-      setResult({
-        message: `Successfully generated 24h nominal baseline telemetry (96 records) for ${stationId}.`,
-        status: 'ok',
-      });
+      setResult({ message: res.message, status: 'ok' });
     } catch (err) {
       setError(err.message || 'Failed to generate baseline data.');
     } finally {
@@ -354,8 +351,8 @@ export default function DemoControls() {
                 {result.anomaly_type && (
                   <div className="bg-[#08122c] p-2.5 rounded-lg border border-cyan-500/15 text-[11px] space-y-1 text-slate-300">
                     <div>Type: <span className="text-cyan-300 font-bold">{result.anomaly_type.toUpperCase()}</span></div>
-                    <div>Affected: <span className="text-white">{result.parameters?.join(', ')}</span></div>
-                    <div>Station: <span className="text-white">{result.station_id}</span></div>
+                    <div>Affected: <span className="text-white">{result.affected_parameters?.join(', ')}</span></div>
+                    <div>Station: <span className="text-white">{result.station_label}</span></div>
                   </div>
                 )}
               </div>

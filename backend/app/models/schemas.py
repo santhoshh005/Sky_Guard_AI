@@ -1,9 +1,10 @@
 """Pydantic schemas for SkyGuard AI API endpoints.
 Defines all request/response models specified in /docs/HANDOFF.md §8.
 """
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # Parameter constants
@@ -22,20 +23,43 @@ PARAMETERS = [
 # Observation Schemas
 # ==============================================================================
 
+Severity = Literal["normal", "warning", "critical"]
+AlertSeverity = Literal["info", "warning", "critical"]
+RootCause = Literal["spike", "frozen", "drift", "communication", "multivariate"]
+HealthStatus = Literal["healthy", "degraded", "maintenance_recommended", "sensor_critical"]
+ParameterName = Literal[
+    "temperature", "humidity", "pressure", "wind_speed", "wind_direction", "rainfall", "solar_radiation"
+]
+
+STATION_CODE_PATTERN = r"^[A-Za-z0-9_\-]{2,50}$"
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Treat naive timestamps as UTC and normalise aware ones to UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class ObservationInput(BaseModel):
-    station_code: str = Field(..., example="AWS_MUM_001")
-    observed_at: datetime = Field(..., example="2026-08-24T10:30:00Z")
-    temperature: Optional[float] = Field(None, example=32.5)
-    humidity: Optional[float] = Field(None, example=78.2)
-    pressure: Optional[float] = Field(None, example=1008.3)
-    wind_speed: Optional[float] = Field(None, example=4.2)
-    wind_direction: Optional[float] = Field(None, example=225.0)
-    rainfall: Optional[float] = Field(None, example=0.0)
-    solar_radiation: Optional[float] = Field(None, example=650.0)
+    # Reject NaN/Infinity: they are not valid sensor readings and break JSON storage.
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    station_code: str = Field(..., pattern=STATION_CODE_PATTERN, examples=["AWS_MUM_001"])
+    observed_at: datetime = Field(..., examples=["2026-08-24T10:30:00Z"])
+    temperature: Optional[float] = Field(None, examples=[32.5])
+    humidity: Optional[float] = Field(None, examples=[78.2])
+    pressure: Optional[float] = Field(None, examples=[1008.3])
+    wind_speed: Optional[float] = Field(None, examples=[4.2])
+    wind_direction: Optional[float] = Field(None, examples=[225.0])
+    rainfall: Optional[float] = Field(None, examples=[0.0])
+    solar_radiation: Optional[float] = Field(None, examples=[650.0])
+
+    _utc = field_validator("observed_at")(_as_utc)
 
 
 class ObservationBatchInput(BaseModel):
-    observations: List[ObservationInput]
+    observations: List[ObservationInput] = Field(..., min_length=1)
 
 
 class AnomalySummary(BaseModel):
@@ -69,15 +93,17 @@ class ObservationBatchResponse(BaseModel):
 # ==============================================================================
 
 class StationCreate(BaseModel):
-    station_code: str
-    name: str
-    latitude: float
-    longitude: float
-    elevation_m: Optional[float] = None
-    state: Optional[str] = None
-    district: Optional[str] = None
-    station_type: Optional[str] = "AWS"
-    expected_interval_min: Optional[int] = 15
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    station_code: str = Field(..., pattern=STATION_CODE_PATTERN)
+    name: str = Field(..., min_length=1, max_length=255)
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    elevation_m: Optional[float] = Field(None, ge=-500, le=9000)
+    state: Optional[str] = Field(None, max_length=100)
+    district: Optional[str] = Field(None, max_length=100)
+    station_type: str = Field("AWS", max_length=50)
+    expected_interval_min: int = Field(15, ge=1, le=1440)
 
 
 class StationResponse(BaseModel):
@@ -263,12 +289,21 @@ class DashboardSummary(BaseModel):
 # ==============================================================================
 
 class DemoInjectRequest(BaseModel):
-    station_id: str
-    anomaly_type: str = Field(..., example="spike")  # 'spike', 'frozen', 'drift', 'missing', 'multivariate'
-    parameters: Optional[List[str]] = Field(None, example=["temperature"])
-    duration_minutes: Optional[int] = None
-    duration_min: Optional[int] = None
-    magnitude: Optional[float] = 3.0
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    station_id: str = Field(..., min_length=2, max_length=64)
+    anomaly_type: Literal["spike", "frozen", "drift", "missing", "communication", "multivariate"] = Field(
+        ..., examples=["spike"]
+    )
+    parameters: Optional[List[ParameterName]] = Field(None, examples=[["temperature"]])
+    duration_minutes: Optional[int] = Field(None, ge=15, le=720)
+    duration_min: Optional[int] = Field(None, ge=15, le=720)
+    magnitude: float = Field(3.0, gt=0, le=10)
+
+    @field_validator("anomaly_type", mode="before")
+    @classmethod
+    def _lower(cls, v):
+        return v.lower() if isinstance(v, str) else v
 
 
 class DemoInjectResponse(BaseModel):
@@ -281,9 +316,9 @@ class DemoInjectResponse(BaseModel):
 class DemoGenerateRequest(BaseModel):
     station_id: Optional[str] = None
     station_ids: Optional[List[str]] = None
-    days: Optional[int] = None
-    hours: Optional[int] = None
-    interval_min: Optional[int] = 15
+    days: Optional[int] = Field(None, ge=1, le=3)
+    hours: Optional[int] = Field(None, ge=1, le=72)
+    interval_min: int = Field(15, ge=5, le=60)
 
 
 class DemoGenerateResponse(BaseModel):
@@ -296,6 +331,20 @@ class DemoGenerateResponse(BaseModel):
 # ==============================================================================
 # WebSocket Message Schemas
 # ==============================================================================
+
+class ObservationPoint(BaseModel):
+    observed_at: datetime
+    raw: Optional[float] = None
+    corrected: Optional[float] = None
+    is_anomaly: bool = False
+    severity: str = "normal"
+
+
+class ObservationSeriesResponse(BaseModel):
+    station_id: str
+    parameter: str
+    points: List[ObservationPoint]
+
 
 class WebSocketSubscription(BaseModel):
     action: str = "subscribe"

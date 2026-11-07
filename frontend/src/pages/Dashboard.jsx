@@ -20,71 +20,66 @@ import {
 import StatCard from '../components/StatCard';
 import StationMap from '../components/StationMap';
 import StatusBadge from '../components/StatusBadge';
+import ErrorBanner from '../components/ErrorBanner';
 import { api } from '../services/api';
 
-const DEFAULT_SUMMARY = {
-  total_stations: 5,
-  active_stations: 5,
-  anomalies_24h: 19,
-  critical_alerts: 10,
-  avg_health: 98.4,
-  stations_needing_maintenance: 0,
-  observations_24h: 475,
-};
+function readCache(key, fallback) {
+  try {
+    const cached = localStorage.getItem(key);
+    return cached ? JSON.parse(cached) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeCache(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* storage unavailable (private mode / quota) */
+  }
+}
+
+function healthLabel(h) {
+  if (h >= 70) return 'Healthy';
+  if (h >= 40) return 'Degraded';
+  return 'Critical';
+}
 
 export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
-  const [summary, setSummary] = useState(() => {
-    try {
-      const cached = localStorage.getItem('skyguard_summary');
-      return cached ? JSON.parse(cached) : DEFAULT_SUMMARY;
-    } catch {
-      return DEFAULT_SUMMARY;
-    }
-  });
-
-  const [stations, setStations] = useState(() => {
-    try {
-      const cached = localStorage.getItem('skyguard_stations');
-      return cached ? JSON.parse(cached) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [recentAnomalies, setRecentAnomalies] = useState(() => {
-    try {
-      const cached = localStorage.getItem('skyguard_anomalies');
-      return cached ? JSON.parse(cached) : [];
-    } catch {
-      return [];
-    }
-  });
-
+  // Last good values are cached so the page renders instantly; no fabricated defaults.
+  const [summary, setSummary] = useState(() => readCache('skyguard_summary', null));
+  const [stations, setStations] = useState(() => readCache('skyguard_stations', []));
+  const [recentAnomalies, setRecentAnomalies] = useState(() => readCache('skyguard_anomalies', []));
+  const [openAlerts, setOpenAlerts] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   async function loadData() {
     try {
       setLoading(true);
-      const [sumRes, stnRes, anomRes] = await Promise.allSettled([
+      const [sumRes, stnRes, anomRes, alertRes] = await Promise.allSettled([
         api.getDashboardSummary(),
         api.getStations({ limit: 100 }),
         api.getAnomalies({ limit: 8 }),
+        api.getAlerts({ is_resolved: false, limit: 10 }),
       ]);
+      if (alertRes.status === 'fulfilled' && alertRes.value?.alerts) setOpenAlerts(alertRes.value.alerts);
 
       if (sumRes.status === 'fulfilled' && sumRes.value) {
         setSummary(sumRes.value);
-        localStorage.setItem('skyguard_summary', JSON.stringify(sumRes.value));
+        writeCache('skyguard_summary', sumRes.value);
       }
       if (stnRes.status === 'fulfilled' && stnRes.value?.stations) {
         setStations(stnRes.value.stations);
-        localStorage.setItem('skyguard_stations', JSON.stringify(stnRes.value.stations));
+        writeCache('skyguard_stations', stnRes.value.stations);
       }
       if (anomRes.status === 'fulfilled' && anomRes.value?.anomalies) {
         setRecentAnomalies(anomRes.value.anomalies);
-        localStorage.setItem('skyguard_anomalies', JSON.stringify(anomRes.value.anomalies));
+        writeCache('skyguard_anomalies', anomRes.value.anomalies);
       }
-    } catch (err) {
-      console.error('Failed to load dashboard data:', err);
+      const failed = [sumRes, stnRes, anomRes, alertRes].find((r) => r.status === 'rejected');
+      setError(failed ? `${failed.reason?.message || 'Request failed'} Showing last known data.` : null);
     } finally {
       setLoading(false);
     }
@@ -94,8 +89,23 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
     loadData();
   }, []);
 
+  // Refresh KPIs when live anomaly events arrive (backend caches the summary for 3 s)
+  useEffect(() => {
+    if (liveAnomalies.length > 0) loadData();
+  }, [liveAnomalies.length]);
+
+  // Live pushes first, then currently open alerts from the API (deduplicated)
+  const incidents = [...liveAlerts, ...openAlerts].filter(
+    (a, i, all) => !a.id || all.findIndex((b) => b.id === a.id) === i
+  );
+
+  const onlinePct = summary?.total_stations
+    ? Math.round((summary.active_stations / summary.total_stations) * 100)
+    : null;
+
   return (
     <div className="space-y-6 pb-16">
+      <ErrorBanner message={error} onRetry={loadData} />
       {/* 1. Operations Center Command Bar */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 p-5 rounded-2xl border border-cyan-500/20 bg-gradient-to-r from-[#0a1435]/90 via-[#070e24]/90 to-[#050b1a]/90 backdrop-blur-xl shadow-2xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
@@ -116,7 +126,9 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
 
         <div className="flex items-center gap-3 shrink-0">
           <button
+            type="button"
             onClick={loadData}
+            disabled={loading}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-cyan-500/20 hover:border-cyan-500/40 transition shadow-inner"
           >
             <RefreshCw className={`h-3.5 w-3.5 text-cyan-400 ${loading ? 'animate-spin' : ''}`} />
@@ -140,7 +152,7 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
           subtitle="Surface AWS Stations"
           icon={Globe2}
           color="cyan"
-          trend="100% Online"
+          trend={onlinePct !== null ? `${onlinePct}% Online` : undefined}
         />
         <StatCard
           title="Anomalies (24h)"
@@ -148,7 +160,6 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
           subtitle="Multi-channel flags"
           icon={AlertTriangle}
           color="amber"
-          trend="AI Filtered"
         />
         <StatCard
           title="Critical Alerts"
@@ -164,7 +175,7 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
           subtitle="Reliability score"
           icon={HeartPulse}
           color="emerald"
-          trend="Optimal"
+          trend={summary ? healthLabel(summary.avg_health) : undefined}
         />
         <StatCard
           title="Maint. Queue"
@@ -179,7 +190,6 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
           subtitle="Ingested records (24h)"
           icon={Activity}
           color="cyan"
-          trend="15m Step"
         />
       </div>
 
@@ -230,8 +240,8 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
           </div>
 
           <div className="flex-1 overflow-y-auto mt-3.5 space-y-2.5 pr-1">
-            {liveAlerts.length > 0 ? (
-              liveAlerts.slice(0, 10).map((alert, idx) => (
+            {incidents.length > 0 ? (
+              incidents.slice(0, 10).map((alert, idx) => (
                 <div
                   key={alert.id || idx}
                   className="p-3.5 rounded-xl border border-cyan-500/15 bg-[#050b1a]/80 hover:border-cyan-500/40 transition flex flex-col space-y-2 shadow-lg group"
@@ -317,7 +327,7 @@ export default function Dashboard({ liveAlerts = [], liveAnomalies = [] }) {
                       <span className="text-[10px] text-cyan-400 font-mono">{anom.station_code}</span>
                     </td>
                     <td className="py-3 px-4 text-slate-300 text-[11px]">
-                      {new Date(anom.observed_at).toLocaleString()}
+                      {anom.observed_at ? new Date(anom.observed_at).toLocaleString() : '--'}
                     </td>
                     <td className="py-3 px-4 font-sans">
                       <StatusBadge status={anom.root_cause || 'multivariate'} size="sm" />

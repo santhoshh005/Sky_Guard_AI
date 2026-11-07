@@ -13,6 +13,13 @@ function MapFlyTo({ center, zoom }) {
   return null;
 }
 
+// Keyless OpenStreetMap tiles by default (darkened via CSS). Override with VITE_MAP_TILE_URL.
+const CUSTOM_TILES = Boolean(import.meta.env.VITE_MAP_TILE_URL);
+const TILE_URL = import.meta.env.VITE_MAP_TILE_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const TILE_ATTRIBUTION =
+  import.meta.env.VITE_MAP_TILE_ATTRIBUTION ||
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
 export default function StationMap({ stations = [], selectedStation = null, height = '480px' }) {
   const [mapTarget, setMapTarget] = useState({ center: [21.5, 78.9], zoom: 4.5 });
 
@@ -68,8 +75,9 @@ export default function StationMap({ stations = [], selectedStation = null, heig
       >
         <MapFlyTo center={mapTarget.center} zoom={mapTarget.zoom} />
         <TileLayer
-          attribution='&copy; <a href="https://carto.com/">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution={TILE_ATTRIBUTION}
+          url={TILE_URL}
+          className={CUSTOM_TILES ? undefined : 'map-tiles-dark'}
         />
 
         {stations.map((stn) => {

@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
-  AreaChart,
+  ComposedChart,
   Area,
-  LineChart,
   Line,
   XAxis,
   YAxis,
@@ -34,9 +33,11 @@ import { api } from '../services/api';
 export default function StationDetail() {
   const { id } = useParams();
   const [stationData, setStationData] = useState(null);
-  const [anomalies, setAnomalies] = useState([]);
+  const [series, setSeries] = useState([]);
+  const [seriesLoading, setSeriesLoading] = useState(false);
   const [selectedParam, setSelectedParam] = useState('temperature');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   const PARAM_ICONS = {
     temperature: Thermometer,
@@ -61,14 +62,10 @@ export default function StationDetail() {
   async function loadDetail() {
     try {
       setLoading(true);
-      const [detailRes, anomRes] = await Promise.all([
-        api.getStationDetail(id),
-        api.getAnomalies({ station_id: id, limit: 15 }),
-      ]);
-      setStationData(detailRes);
-      setAnomalies(anomRes.anomalies || []);
+      setError(null);
+      setStationData(await api.getStationDetail(id));
     } catch (err) {
-      console.error('Failed to load station detail:', err);
+      setError(err.status === 404 ? 'Station record not found.' : err.message);
     } finally {
       setLoading(false);
     }
@@ -77,6 +74,19 @@ export default function StationDetail() {
   useEffect(() => {
     loadDetail();
   }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSeriesLoading(true);
+    api
+      .getStationObservations(id, { parameter: selectedParam, hours: 24 })
+      .then((res) => !cancelled && setSeries(res.points || []))
+      .catch(() => !cancelled && setSeries([]))
+      .finally(() => !cancelled && setSeriesLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [id, selectedParam]);
 
   if (loading && !stationData) {
     return (
@@ -88,22 +98,22 @@ export default function StationDetail() {
   }
 
   if (!stationData) {
-    return <div className="p-8 text-center text-rose-400 font-mono">Station record not found.</div>;
+    return (
+      <div role="alert" className="p-8 text-center text-rose-400 font-mono">
+        {error || 'Station record not found.'}
+      </div>
+    );
   }
 
   const { station, health, recent_alerts, last_observation } = stationData;
 
-  // Mock dual waveform data for selected channel
-  const chartData = [
-    { time: '10:00', raw: 31.2, corrected: 31.2 },
-    { time: '10:15', raw: 31.8, corrected: 31.8 },
-    { time: '10:30', raw: 32.4, corrected: 32.4 },
-    { time: '10:45', raw: 54.8, corrected: 32.9 }, // Simulated spike
-    { time: '11:00', raw: 33.1, corrected: 33.1 },
-    { time: '11:15', raw: 33.6, corrected: 33.6 },
-    { time: '11:30', raw: 34.0, corrected: 34.0 },
-    { time: '11:45', raw: 34.2, corrected: 34.2 },
-  ];
+  // Raw vs AI-corrected trace for the selected channel (last 24 h)
+  const chartData = series.map((pt) => ({
+    time: new Date(pt.observed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    raw: pt.raw,
+    corrected: pt.corrected,
+  }));
+
 
   return (
     <div className="space-y-6 pb-16">
@@ -161,6 +171,8 @@ export default function StationDetail() {
             return (
               <button
                 key={param}
+                type="button"
+                aria-pressed={isSelected}
                 onClick={() => setSelectedParam(param)}
                 className={`text-left p-3.5 rounded-xl border transition-all duration-200 relative overflow-hidden group ${
                   isSelected
@@ -214,9 +226,14 @@ export default function StationDetail() {
             </span>
           </div>
 
-          <div className="h-72 w-full pt-2">
+          <div className="h-72 w-full pt-2 relative">
+            {!seriesLoading && chartData.length === 0 && (
+              <p className="absolute inset-0 flex items-center justify-center text-xs text-slate-500 font-mono z-10">
+                No observations in the last 24 hours.
+              </p>
+            )}
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorRaw" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4} />
@@ -228,7 +245,7 @@ export default function StationDetail() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                <XAxis dataKey="time" stroke="#64748b" fontSize={11} fontFamly="JetBrains Mono" />
+                <XAxis dataKey="time" stroke="#64748b" fontSize={11} fontFamily="JetBrains Mono" />
                 <YAxis stroke="#64748b" fontSize={11} fontFamily="JetBrains Mono" />
                 <Tooltip
                   contentStyle={{
@@ -256,9 +273,10 @@ export default function StationDetail() {
                   stroke="#00f0ff"
                   strokeWidth={2.5}
                   strokeDasharray="4 4"
-                  dot={{ r: 4, fill: '#00f0ff' }}
+                  dot={false}
+                  connectNulls
                 />
-              </AreaChart>
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         </div>

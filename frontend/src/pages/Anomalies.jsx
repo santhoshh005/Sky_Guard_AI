@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, ArrowUpRight, Filter, Layers, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, RefreshCw } from 'lucide-react';
 import StatusBadge from '../components/StatusBadge';
+import ErrorBanner from '../components/ErrorBanner';
 import { api } from '../services/api';
 
 export default function Anomalies() {
@@ -9,6 +10,7 @@ export default function Anomalies() {
   const [severityFilter, setSeverityFilter] = useState('');
   const [rootCauseFilter, setRootCauseFilter] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   async function loadAnomalies() {
     try {
@@ -18,8 +20,9 @@ export default function Anomalies() {
       if (rootCauseFilter) params.root_cause = rootCauseFilter;
       const res = await api.getAnomalies(params);
       setAnomalies(res.anomalies || []);
+      setError(null);
     } catch (err) {
-      console.error('Failed to load anomalies:', err);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -31,6 +34,7 @@ export default function Anomalies() {
 
   return (
     <div className="space-y-6 pb-16">
+      <ErrorBanner message={error} onRetry={loadAnomalies} />
       {/* Header & Controls */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 p-5 rounded-2xl border border-cyan-500/20 bg-[#08122c]/80 backdrop-blur-xl shadow-xl">
         <div>
@@ -49,6 +53,7 @@ export default function Anomalies() {
           <select
             id="severityFilter"
             name="severityFilter"
+            aria-label="Filter by severity"
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"
@@ -61,6 +66,7 @@ export default function Anomalies() {
           <select
             id="rootCauseFilter"
             name="rootCauseFilter"
+            aria-label="Filter by root cause"
             value={rootCauseFilter}
             onChange={(e) => setRootCauseFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"
@@ -74,6 +80,8 @@ export default function Anomalies() {
           </select>
 
           <button
+            type="button"
+            aria-label="Refresh anomalies"
             onClick={loadAnomalies}
             className="p-2 rounded-xl bg-[#050b1a] hover:bg-slate-800 text-slate-300 border border-cyan-500/20 hover:border-cyan-400 transition shadow-inner"
           >
@@ -140,7 +148,7 @@ export default function Anomalies() {
               ) : (
                 <tr>
                   <td colSpan="8" className="py-14 text-center text-slate-500 font-sans">
-                    No anomalies found matching current criteria.
+                    {loading ? 'Loading detections...' : 'No anomalies found matching current criteria.'}
                   </td>
                 </tr>
               )}

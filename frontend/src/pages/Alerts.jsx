@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Filter, Radio, RefreshCw, ShieldAlert, Sparkles } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Radio, RefreshCw } from 'lucide-react';
 import StatusBadge from '../components/StatusBadge';
+import ErrorBanner from '../components/ErrorBanner';
 import { api } from '../services/api';
 
 export default function Alerts() {
@@ -8,6 +9,8 @@ export default function Alerts() {
   const [severityFilter, setSeverityFilter] = useState('');
   const [resolvedFilter, setResolvedFilter] = useState('false');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [resolving, setResolving] = useState(null);
 
   async function loadAlerts() {
     try {
@@ -17,8 +20,9 @@ export default function Alerts() {
       if (resolvedFilter !== '') params.is_resolved = resolvedFilter === 'true';
       const res = await api.getAlerts(params);
       setAlerts(res.alerts || []);
+      setError(null);
     } catch (err) {
-      console.error('Failed to load alerts:', err);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -30,17 +34,23 @@ export default function Alerts() {
 
   async function handleResolve(alertId) {
     try {
-      await api.resolveAlert(alertId);
+      setResolving(alertId);
+      const updated = await api.resolveAlert(alertId);
       setAlerts((prev) =>
-        prev.map((a) => (a.id === alertId ? { ...a, is_resolved: true, resolved_at: new Date().toISOString() } : a))
+        resolvedFilter === 'false'
+          ? prev.filter((a) => a.id !== alertId)
+          : prev.map((a) => (a.id === alertId ? { ...a, ...updated } : a))
       );
     } catch (err) {
-      console.error('Failed to resolve alert:', err);
+      setError(`Could not resolve alert: ${err.message}`);
+    } finally {
+      setResolving(null);
     }
   }
 
   return (
     <div className="space-y-6 pb-16">
+      <ErrorBanner message={error} onRetry={loadAlerts} />
       {/* Header & Controls */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 p-5 rounded-2xl border border-cyan-500/20 bg-[#08122c]/80 backdrop-blur-xl shadow-xl">
         <div>
@@ -59,6 +69,7 @@ export default function Alerts() {
           <select
             id="resolvedFilter"
             name="resolvedFilter"
+            aria-label="Filter by status"
             value={resolvedFilter}
             onChange={(e) => setResolvedFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"
@@ -71,6 +82,7 @@ export default function Alerts() {
           <select
             id="alertSeverityFilter"
             name="alertSeverityFilter"
+            aria-label="Filter by severity"
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
             className="bg-[#050b1a] border border-cyan-500/20 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400 font-mono transition"
@@ -82,6 +94,8 @@ export default function Alerts() {
           </select>
 
           <button
+            type="button"
+            aria-label="Refresh alerts"
             onClick={loadAlerts}
             className="p-2 rounded-xl bg-[#050b1a] hover:bg-slate-800 text-slate-300 border border-cyan-500/20 hover:border-cyan-400 transition shadow-inner"
           >
@@ -127,10 +141,10 @@ export default function Alerts() {
                       )}
                     </td>
                     <td className="py-3.5 px-4 font-mono uppercase text-slate-300 font-bold">
-                      {al.parameter || 'Station Level'}
+                      {al.parameter ? al.parameter.replace(/_/g, ' ') : 'Station Level'}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">
-                      {new Date(al.created_at).toLocaleString()}
+                      {al.created_at ? new Date(al.created_at).toLocaleString() : '--'}
                     </td>
                     <td className="py-3.5 px-4">
                       {al.is_resolved ? (
@@ -146,10 +160,12 @@ export default function Alerts() {
                     <td className="py-3.5 px-4 text-right">
                       {!al.is_resolved ? (
                         <button
+                          type="button"
+                          disabled={resolving === al.id}
                           onClick={() => handleResolve(al.id)}
                           className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold font-mono shadow-md shadow-emerald-500/20 transition-all hover:scale-105"
                         >
-                          Resolve & Close
+                          {resolving === al.id ? 'Resolving...' : 'Resolve & Close'}
                         </button>
                       ) : (
                         <span className="text-slate-500 text-[11px] font-mono">Acknowledged</span>
@@ -160,7 +176,7 @@ export default function Alerts() {
               ) : (
                 <tr>
                   <td colSpan="7" className="py-14 text-center text-slate-500 font-sans">
-                    No active incident tickets found for selected criteria.
+                    {loading ? 'Loading incidents...' : 'No incident tickets found for the selected criteria.'}
                   </td>
                 </tr>
               )}

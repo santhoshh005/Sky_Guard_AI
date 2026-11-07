@@ -1,0 +1,27 @@
+{
+  "precision": 0.8271,
+  "recall": 0.7867,
+  "f1": 0.8064,
+  "false_positive_rate": 0.0226,
+  "root_cause_accuracy": 0.7571,
+  "samples": {
+    "normal": 1635,
+    "anomalous": 225
+  },
+  "recall_by_type": {
+    "multivariate": 1.0,
+    "spike": 1.0,
+    "frozen": 1.0,
+    "drift": 0.6,
+    "communication": 1.0
+  },
+  "root_cause_confusion": {
+    "communication->communication": 15,
+    "drift->drift": 31,
+    "drift->multivariate": 41,
+    "frozen->frozen": 60,
+    "multivariate->multivariate": 13,
+    "multivariate->spike": 2,
+    "spike->spike": 15
+  }
+}

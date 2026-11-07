@@ -1,9 +1,11 @@
+"""Dashboard KPI summary endpoint."""
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
 import numpy as np
 from fastapi import APIRouter
 
+from app.config import settings
 from app.models.database import db_client
 from app.models.schemas import DashboardSummary
 from app.routers.observations import health_scorer, station_cache
@@ -19,7 +21,6 @@ _cached_time = 0.0
 async def get_dashboard_summary():
     """Retrieve high-level network statistics and health KPIs with sub-100ms parallel queries."""
     global _cached_summary, _cached_time
-    import time
     now_ts = time.time()
     if _cached_summary and (now_ts - _cached_time < 3.0):
         return _cached_summary
@@ -58,7 +59,7 @@ async def get_dashboard_summary():
     for stn in stations:
         score, status_str = health_scorer.get_overall_health(stn["id"])
         health_scores.append(score)
-        if score < 40.0:
+        if score < settings.HEALTH_MAINTENANCE_THRESHOLD:
             needing_maintenance += 1
 
     avg_health = float(np.mean(health_scores)) if health_scores else 100.0

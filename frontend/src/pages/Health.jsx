@@ -1,20 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { HeartPulse, Wrench, ShieldAlert, CheckCircle2, AlertTriangle, ArrowUpRight, Cpu } from 'lucide-react';
+import { HeartPulse, Wrench, CheckCircle2, AlertTriangle, ArrowUpRight, Cpu } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import StatusBadge from '../components/StatusBadge';
+import ErrorBanner from '../components/ErrorBanner';
 import { api } from '../services/api';
 
 export default function Health() {
   const [stations, setStations] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   async function loadHealth() {
     try {
       setLoading(true);
       const res = await api.getStations({ limit: 100 });
       setStations(res.stations || []);
+      setError(null);
     } catch (err) {
-      console.error('Failed to load stations health:', err);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -30,6 +33,7 @@ export default function Health() {
 
   return (
     <div className="space-y-6 pb-16">
+      <ErrorBanner message={error} onRetry={loadHealth} />
       {/* 1. Header */}
       <div className="p-5 rounded-2xl border border-cyan-500/20 bg-[#08122c]/80 backdrop-blur-xl shadow-xl">
         <div className="flex items-center gap-2">
@@ -91,7 +95,7 @@ export default function Health() {
             <Cpu className="h-4 w-4 text-cyan-400" />
             <span>Surface AWS Fleet Reliability Matrix</span>
           </h2>
-          <span className="text-xs text-slate-400 font-mono">{stations.length} Active Nodes</span>
+          <span className="text-xs text-slate-400 font-mono">{loading ? 'Loading...' : `${stations.length} Active Nodes`}</span>
         </div>
 
         <div className="overflow-x-auto">
@@ -112,7 +116,7 @@ export default function Health() {
                 <tr key={stn.id} className="hover:bg-cyan-500/5 transition">
                   <td className="py-3.5 px-4 font-bold text-white">{stn.name}</td>
                   <td className="py-3.5 px-4 font-mono text-cyan-400 font-bold">{stn.station_code}</td>
-                  <td className="py-3.5 px-4 text-slate-300">{stn.district}, {stn.state}</td>
+                  <td className="py-3.5 px-4 text-slate-300">{[stn.district, stn.state].filter(Boolean).join(', ') || '--'}</td>
                   <td className="py-3.5 px-4 font-mono font-black text-sm">
                     <span
                       className={

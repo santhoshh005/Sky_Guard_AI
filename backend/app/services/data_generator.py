@@ -1,7 +1,6 @@
 """Synthetic weather data generator and anomaly injector for SkyGuard AI.
 Implements profiles and recipes from /docs/HANDOFF.md §9 & §13.
 """
-import copy
 import math
 import random
 from datetime import datetime, timedelta, timezone
@@ -62,12 +61,14 @@ NORMAL_PROFILES: Dict[str, Dict[str, Any]] = {
         "base": 0.0,
         "probability": 0.05,
         "rain_range": [0.2, 15.0],
+        "noise_std": 2.0,  # used only to scale injected faults
     },
     "solar_radiation": {
         "base": 0.0,
         "max_value": 900.0,
         "sunrise": 6,
         "sunset": 18,
+        "noise_std": 40.0,  # used only to scale injected faults
     },
 }
 
@@ -130,8 +131,18 @@ DEMO_STATIONS = [
 ]
 
 
+STATION_LONGITUDES: Dict[str, float] = {s["station_code"]: s["longitude"] for s in DEMO_STATIONS}
+
+SCALE_HEIGHT_M = 8434.0  # isothermal barometric scale height
+
+
+def station_pressure_base(elevation_m: float = 0.0) -> float:
+    """Mean station-level pressure via the barometric formula (1010 hPa at sea level)."""
+    return NORMAL_PROFILES["pressure"]["base"] * math.exp(-max(0.0, elevation_m) / SCALE_HEIGHT_M)
+
+
 def generate_value(param: str, hour: float, elevation_offset: float = 0.0) -> float:
-    """Generate a realistic physical weather reading for a given hour."""
+    """Generate a realistic physical reading for a given *local solar* hour."""
     profile = NORMAL_PROFILES[param]
 
     if param == "rainfall":
@@ -146,31 +157,32 @@ def generate_value(param: str, hour: float, elevation_offset: float = 0.0) -> fl
             return round(max(0.0, val), 2)
         return 0.0
 
-    # Diurnal sinusoid
     diurnal = profile["diurnal_amp"] * math.sin(2 * math.pi * (hour - profile["peak_hour"] + 6) / 24)
     base = profile["base"]
+    lo, hi = profile["min_bound"], profile["max_bound"]
 
-    # Mild elevation adjustments
     if param == "temperature":
-        base -= (elevation_offset / 100.0) * 0.65  # lapse rate ~0.65C per 100m
+        base -= (elevation_offset / 100.0) * 0.65  # environmental lapse rate 0.65 C / 100 m
     elif param == "pressure":
-        base -= (elevation_offset / 10.0) * 1.2  # ~1.2 hPa drop per 10m
+        sea_level_base = base
+        base = station_pressure_base(elevation_offset)
+        # keep the realistic synoptic band around the elevation-adjusted mean
+        lo, hi = base - (sea_level_base - lo), base + (hi - sea_level_base)
 
     raw = base + diurnal + random.gauss(0, profile["noise_std"])
-
-    if "min_bound" in profile and "max_bound" in profile:
-        raw = max(profile["min_bound"], min(profile["max_bound"], raw))
-
-    return round(raw, 2)
+    return round(max(lo, min(hi, raw)), 2)
 
 
 def generate_observation_dict(
     station_code: str,
     timestamp: datetime,
-    elevation_m: float = 0.0
+    elevation_m: float = 0.0,
+    longitude: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Generate a single clean observation dictionary."""
-    hour = timestamp.hour + timestamp.minute / 60.0
+    """Generate a single clean observation. Diurnal cycles follow local solar time."""
+    if longitude is None:
+        longitude = STATION_LONGITUDES.get(station_code, 0.0)
+    hour = (timestamp.hour + timestamp.minute / 60.0 + longitude / 15.0) % 24.0
     obs = {
         "station_code": station_code,
         "observed_at": timestamp.isoformat(),

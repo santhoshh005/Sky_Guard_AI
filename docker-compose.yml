@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -8,9 +6,9 @@ services:
     container_name: skyguard-backend
     ports:
       - "8000:8000"
+    # Secrets come from backend/.env (copy backend/.env.example); never inline them here.
+    env_file:
+      - backend/.env
     environment:
-      - SUPABASE_URL=https://ncjejgcosipagizirjxs.supabase.co
-      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jamVqZ2Nvc2lwYWdpemlyanhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1ODY2MzQsImV4cCI6MjEwMzE2MjYzNH0.swzM3VfO-FLilm93D_AwTjRoJlAxWGjMZfgHPt1WrHw
       - ML_MODEL_DIR=/app/ml/models
-      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,*
     restart: unless-stopped

@@ -2,19 +2,32 @@
 Implements reconstruction error scoring and per-parameter error decomposition.
 Specified in /docs/HANDOFF.md §3.3, §14.2.
 """
+import logging
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
+
 import numpy as np
 
+from app.config import settings
 from app.services.feature_engineer import PARAMETERS
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
+logger = logging.getLogger("skyguard.ml")
+
+
+def calibrate_ae_score(mse: float, threshold: float) -> float:
+    """Map reconstruction MSE to [0, 1]: (mse / p95)^2, saturating at the 95th percentile.
+
+    Squaring keeps typical normal reconstructions near 0 while anything at or above the
+    training 95th-percentile error saturates to 1.
+    """
+    ratio = mse / max(1e-9, threshold)
+    return float(min(1.0, ratio * ratio))
 
 
 class AutoencoderInference:
     def __init__(self, model_dir: Optional[Path] = None):
-        self.model_dir = model_dir or MODEL_DIR
+        self.model_dir = Path(model_dir or settings.ML_MODEL_DIR)
         self.model = None
         self.scaler = None
         self.threshold = 1.0
@@ -38,6 +51,12 @@ class AutoencoderInference:
                     self.per_param_thresholds = data.get("per_param", {})
                 else:
                     self.threshold = float(data)
+        else:
+            logger.warning("Autoencoder artifacts not found in %s; AE channel disabled.", self.model_dir)
+
+    @property
+    def loaded(self) -> bool:
+        return self.model is not None and self.scaler is not None
 
     def score(self, compact_vector: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
         """
@@ -52,13 +71,12 @@ class AutoencoderInference:
         if self.model is None or self.scaler is None:
             return 0.0, compact_vector, compact_vector
 
-        vec_2d = compact_vector.reshape(1, -1)
+        vec_2d = np.nan_to_num(compact_vector.reshape(1, -1), nan=0.0, posinf=0.0, neginf=0.0)
         scaled_orig = self.scaler.transform(vec_2d)
         reconstructed = self.model.predict(scaled_orig)
 
         mse = float(np.mean((scaled_orig[0] - reconstructed[0]) ** 2))
-        ae_score = float(min(1.0, mse / max(1e-6, self.threshold)))
-        return ae_score, scaled_orig[0], reconstructed[0]
+        return calibrate_ae_score(mse, self.threshold), scaled_orig[0], reconstructed[0]
 
     def get_per_parameter_error(
         self,

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
+import { api } from '../services/api';
 import {
   Activity,
   AlertTriangle,
@@ -26,15 +27,30 @@ export default function Navbar({ wsStatus = 'connected' }) {
     { to: '/demo', label: 'Demo Center', icon: Sliders, highlight: true },
   ];
 
-  // Dummy continuous ticker data
-  const tickerItems = [
-    '🛰️ AWS_MUM_001 [MUMBAI]: 31.8°C | RH 76% | 1008 hPa • NOMINAL',
-    '⚡ AWS_DEL_001 [DELHI]: 34.2°C | RH 58% | 1004 hPa • NOMINAL',
-    '🌊 AWS_CHN_001 [CHENNAI]: 32.0°C | RH 81% | 1009 hPa • NOMINAL',
-    '🍃 AWS_BLR_001 [BENGALURU]: 26.5°C | RH 64% | 915 hPa • SENSOR HEALTH 98%',
-    '☀️ AWS_KOL_001 [KOLKATA]: 33.1°C | RH 74% | 1007 hPa • NOMINAL',
-    '🤖 3-CHANNEL ML FUSION ENGINE: 94.94% BENCHMARK F1 ACTIVE',
-  ];
+  // Live station health ticker (refreshed every 60 s)
+  const [tickerItems, setTickerItems] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api
+        .getStations({ limit: 100 })
+        .then((res) => {
+          if (cancelled) return;
+          setTickerItems(
+            (res.stations || []).map(
+              (s) =>
+                `${s.station_code} [${(s.district || s.name).toUpperCase()}] • HEALTH ${Math.round(s.overall_health)}% • ${s.health_status.replace(/_/g, ' ').toUpperCase()}${s.active_alerts ? ` • ${s.active_alerts} OPEN ALERT${s.active_alerts > 1 ? 'S' : ''}` : ''}`
+            )
+          );
+        })
+        .catch(() => !cancelled && setTickerItems([]));
+    load();
+    const timer = setInterval(load, 60000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   return (
     <header className="sticky top-0 z-50 flex flex-col border-b border-cyan-500/20 bg-[#060b1e]/90 backdrop-blur-xl">
@@ -42,10 +58,11 @@ export default function Navbar({ wsStatus = 'connected' }) {
       <div className="hidden sm:flex h-6 items-center overflow-hidden border-b border-cyan-500/10 bg-[#030712]/80 px-4 text-[11px] font-mono text-cyan-400/90">
         <span className="shrink-0 font-bold uppercase tracking-wider text-emerald-400 mr-3 flex items-center gap-1.5">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-          LIVE TELEMETRY STREAM:
+          STATION HEALTH:
         </span>
         <div className="flex-1 overflow-hidden relative">
           <div className="animate-ticker space-x-8">
+            {tickerItems.length === 0 && <span className="inline-block text-slate-500">Waiting for station data...</span>}
             {[...tickerItems, ...tickerItems].map((item, idx) => (
               <span key={idx} className="inline-block hover:text-white transition-colors cursor-default">
                 {item}
@@ -133,6 +150,9 @@ export default function Navbar({ wsStatus = 'connected' }) {
 
             {/* Mobile Hamburger Menu Toggle */}
             <button
+              type="button"
+              aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"}
+              aria-expanded={mobileMenuOpen}
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               className="lg:hidden p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
             >

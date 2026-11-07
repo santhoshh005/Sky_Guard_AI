@@ -1,189 +1,216 @@
-# 🛡️ SkyGuard AI — Automatic Weather Station Anomaly Detection Platform
+# SkyGuard AI
 
-[![SIH 2026](https://img.shields.io/badge/SIH-2026-blue.svg)](https://sih.gov.in)
-[![Ministry](https://img.shields.io/badge/Ministry-MoES%20%2F%20IMD-orange.svg)](https://mausam.imd.gov.in)
-[![ML Precision](https://img.shields.io/badge/Benchmark%20F1-94.9%25-emerald.svg)]()
-[![FastAPI](https://img.shields.io/badge/FastAPI-1.0.0-009688.svg)]()
-[![React](https://img.shields.io/badge/React-18-61DAFB.svg)]()
+Anomaly detection, sensor health scoring and value correction for Automatic Weather Stations (AWS).
+Built for Smart India Hackathon problem statement **SIH26073** (MoES / IMD).
 
-> **SIH26073 Problem Statement**: AI/ML-driven automated anomaly detection, sensor health scoring, TreeSHAP root-cause explainability, and telemetry value correction for Indian Meteorological Department (IMD) Automatic Weather Stations (AWS).
+Every 15-minute observation is checked by deterministic quality control and two ML models. The
+results are fused into one anomaly score, the probable cause is identified, sensor health is
+updated, and a corrected value is estimated. Raw telemetry is never modified.
 
----
+| Layer | Stack |
+| --- | --- |
+| API | Python, FastAPI, httpx (Supabase PostgREST) |
+| ML | scikit-learn: Isolation Forest + MLP autoencoder, SHAP TreeExplainer, linear regressions |
+| Database | Supabase PostgreSQL (`backend/schema.sql`) |
+| Dashboard | React 18, Vite, Tailwind CSS, Recharts, Leaflet |
+| Live updates | WebSocket (`/api/v1/ws/live`) |
 
-## 🌟 Key Architecture & Capabilities
+## How detection works
 
 ```
-                  ┌────────────────────────────────────────┐
-                  │ 15-Minute Raw AWS Telemetry Ingestion  │
-                  └───────────────────┬────────────────────┘
-                                      │
-               ┌──────────────────────┴──────────────────────┐
-               ▼                                             ▼
-  ┌─────────────────────────┐                   ┌─────────────────────────┐
-  │ Deterministic QC Engine │                   │ Feature Engineering     │
-  │ • Physical range bounds │                   │ • Time-range rolling    │
-  │ • Frozen value check    │                   │ • Rate-of-change deltas │
-  │ • 24h rolling spike std │                   │ • Correlations (24h)    │
-  │ • Timestamp gap check   │                   │ • Temporal day/night    │
-  └────────────┬────────────┘                   └────────────┬────────────┘
-               │ (Weight: 0.35)                              │
-               │                                ┌────────────┴────────────┐
-               │                                ▼                         ▼
-               │                   ┌─────────────────────────┐ ┌─────────────────────────┐
-               │                   │  Isolation Forest (IF)  │ │  14-8-4-8-14 Autoenc.   │
-               │                   │  (~110-dim density)     │ │  (14-dim reconstruction)│
-               │                   └────────────┬────────────┘ └────────────┬────────────┘
-               │                                │ (Weight: 0.30)          │ (Weight: 0.35)
-               └────────────────────────────────┼─────────────────────────┘
-                                                ▼
-                               ┌─────────────────────────────────┐
-                               │ 3-Channel Fusion & Confidence   │
-                               │ fused = 0.35·QC+0.30·IF+0.35·AE │
-                               └────────────────┬────────────────┘
-                                                │
-         ┌──────────────────────────────────────┼──────────────────────────────────────┐
-         ▼                                      ▼                                      ▼
-┌─────────────────────────┐            ┌─────────────────────────┐            ┌─────────────────────────┐
-│ Root-Cause & TreeSHAP   │            │ Sensor Health Engine    │            │ Automated Value Correct.│
-│ • Spike (transient jump)│            │ • Health Index [0-100]  │            │ • Temporal median       │
-│ • Frozen (stuck sensor) │            │ • Streak penalties      │            │ • Diurnal trend inter.  │
-│ • Drift (calibration)   │            │ • Time decay            │            │ • Cross-param regression│
-│ • Communication dropout │            │ • Maintenance alerts    │            │ (Raw telemetry preserved│
-│ • Multivariate extreme  │            └─────────────────────────┘            └─────────────────────────┘
-└─────────────────────────┘
+observation ─► QC checks ──────────┐
+           ├─► Isolation Forest ───┼─► fusion ─► root cause ─► health score ─► correction ─► store + alert + push
+           ├─► Autoencoder ────────┘                ▲
+           └─► drift detector ──────────────────────┘
 ```
 
-1. **3-Channel Multi-Paradigm Fusion**:
-   $$\text{Fused Score} = 0.35 \times \text{QC} + 0.30 \times \text{IF} + 0.35 \times \text{AE}$$
-   Achieves **94.94% F1-Score** on benchmark datasets.
-2. **TreeSHAP Explainability**: Translates high-dimensional vector anomalies into plain English diagnostic reports explaining which sensors deviated and why.
-3. **Adaptive Sensor Health Scoring [0–100]**: Accelerates penalty on consecutive anomalies ($2.0 \times [1 + 0.5 \cdot \min(\text{streak}, 10)]$), applies time decay for missed reporting intervals, and recovers gradually ($+0.5$ per clean observation).
-4. **Automated Correction without Data Loss**: Preserves raw telemetry permanently in `observations` table while deriving replacement values using temporal median filters, diurnal trends, or cross-parameter linear regression.
-5. **Real-time Push Stream**: Low-latency WebSocket event broadcaster ($<2\text{s}$ response).
+**1. Deterministic QC**, per sensor:
+- **Missing:** no value reported.
+- **Range:** outside physical limits (e.g. humidity 0–100 %).
+- **Frozen:** 4 identical consecutive readings. Natural constants are exempt: no rain, calm wind, night-time solar radiation, saturated humidity.
+- **Spike:** a step from the recent median larger than both 5× the station's robust 15-minute step scale and a plausible weather-change floor.
+- **Timestamp gap:** station-level, a reporting interval that is too long.
 
----
+The QC score is a noisy-OR of severity-weighted flags, so one hard violation dominates instead of being diluted.
 
-## 🚀 Quick Start (Local Run)
+**2. Isolation Forest** runs on 110 engineered features: rolling 1 h / 6 h / 24 h stats, deltas, correlations, local solar time and missingness. It is calibrated with a logistic map.
 
-### 1. Prerequisites
-- Python 3.11+
-- Node.js 18+ and npm
+**3. Autoencoder** (14 → 8 → 4 → 8 → 14) runs on raw values plus deltas. The score is (MSE / p99.5 training error)².
 
-### 2. Backend Setup
+**4. Fusion:** `fused = 0.35·QC + 0.30·IF + 0.35·AE`.
+- An observation is anomalous when `fused ≥ 0.5`, or when a hard QC rule (range, frozen or spike) fires.
+- Severity is critical at `fused ≥ 0.8`.
+- Confidence is the agreement between the three channels, raised to the QC score when a deterministic rule fired.
+
+**5. Drift detection:** a residual (measured minus expected value) that keeps the same sign and grows over consecutive readings. The expected value comes from a per-station cross-parameter regression, with yesterday's value at the same time of day as a fallback.
+
+**6. Root cause** rules, evaluated in this order:
+
+| Order | Cause | Condition |
+| --- | --- | --- |
+| 1 | communication | 3+ sensors missing |
+| 2 | frozen | stuck-sensor QC flag |
+| 3 | spike | step-test spike on 1–2 sensors |
+| 4 | drift | growing same-sign residual (see step 5) |
+| 5 | communication | 1–2 sensors missing, or a reporting gap |
+| 6 | multivariate | anything else |
+
+**7. Sensor health (0–100):**
+- **Penalty:** applied only to the sensors actually implicated, growing with consecutive anomalies.
+- **Recovery:** +0.5 per clean reading.
+- **Gap decay:** capped at 10 points per outage.
+- **Persistence:** scores are restored from `sensor_health_history` on startup.
+
+**8. Correction:** temporal median for spikes, diurnal trend for frozen sensors, and cross-parameter regression for drift. Only the affected sensors are corrected.
+
+## Measured accuracy
+
+`python -m ml.training.train_models` trains on synthetic data and then benchmarks with the exact production scoring code (`app/services/pipeline.py`). It uses held-out synthetic data for all 5 stations: 1,635 normal and 225 faulty readings. Results are written to `ml/benchmark_results.json`.
+
+| Metric | Value |
+| --- | --- |
+| Precision | 82.7 % |
+| Recall | 78.7 % |
+| F1 | 80.6 % |
+| False-positive rate (normal readings) | 2.3 % |
+| Recall by fault type | spike, frozen, multivariate, communication: 100 %; drift: 60 % |
+| Root-cause accuracy (detected faults) | 75.7 % |
+
+The labelling rules:
+- Readings 2–3 of a stuck run can't be told apart from "no change", so they aren't scored.
+- The single reading where a synthetic fault snaps back to normal isn't scored either.
+- Early drift readings, whose offset is still within sensor noise, count as misses.
+
+Most root-cause errors are wind-speed drift being labelled `multivariate`. The faults are still detected; wind speed is deliberately excluded from drift classification because gusty data produces false drift alarms. All figures come from synthetic data and must be re-validated on real IMD telemetry before operational use.
+
+## Quick start
+
+Prerequisites: Python 3.12+, Node.js 18+, and a Supabase project.
+
+### 1. Database
+
+Create a Supabase project, then run `backend/schema.sql` in the SQL editor.
+
+### 2. Backend
+
 ```bash
-# Navigate to backend directory
 cd backend
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Seed the 5 IMD demo stations & 7-day baseline observations
-python -m app.services.seeder
-
-# Train ML models & run benchmark evaluation
-python -m ml.training.train_models
-
-# Start FastAPI backend server
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cp .env.example .env
 ```
-API Documentation will be live at: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-### 4. Frontend Setup
+Fill in `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `.env`. Then install the dependencies and seed the data:
+
 ```bash
-# In a new terminal, navigate to frontend directory
+pip install -r requirements-dev.txt
+```
+
+```bash
+python -m app.services.seeder
+```
+
+The seeder creates the 5 demo stations and 7 days of baseline data.
+
+```bash
+cd .. && python -m ml.training.train_models && cd backend
+```
+
+This trains the models (about 1 minute) and writes the benchmark results.
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+API docs are at http://localhost:8000/docs.
+
+### 3. Dashboard
+
+```bash
 cd frontend
-
-# Install dependencies
-npm install
-
-# Start Vite development server
+npm ci
 npm run dev
 ```
-Dashboard UI will be live at: [http://localhost:5173](http://localhost:5173)
 
----
+The dashboard is at http://localhost:5173. Optional frontend variables: `VITE_API_URL`, `VITE_WS_URL`, `VITE_MAP_TILE_URL`.
 
-## 🐳 Docker Deployment
+### Tests
 
-To run the entire backend in a container:
 ```bash
-docker-compose up --build -d
+cd backend && python -m pytest
 ```
 
----
+The suite runs the full API against an in-memory PostgREST stand-in, so it needs no Supabase project.
 
-## 🔬 SIH Judge Live Demonstration Script
+### Docker (backend)
 
-Follow this step-by-step walkthrough to demonstrate the system live to judges:
-
-| Step | Action | Expected Output in UI |
-| :--- | :--- | :--- |
-| **1. Overview** | Open `http://localhost:5173` | Interactive national Leaflet map shows all 5 seeded AWS stations (Mumbai, Delhi, Chennai, Kolkata, Bengaluru) with green healthy status markers. |
-| **2. Demo Center** | Click **Demo Center** in top navbar | Opens the Fault Simulation console. Select **Mumbai Colaba (`AWS_MUM_001`)**. |
-| **3. Spike Injection** | Select **Transient Sensor Spike**, choose `temperature`, click **Inject Fault Scenario Live** | Within &lt;1 second: <br>• Diagnostic Terminal shows execution success.<br>• Live Alert Stream flashes with critical anomaly alert.<br>• Root-cause classified as **`SPIKE`**.<br>• Value estimated via **Temporal Median Filter**. |
-| **4. Frozen Sensor** | Select **Frozen / Stuck Sensor**, choose `humidity`, click **Inject Fault** | • Anomaly registered with **`FROZEN`** badge.<br>• Explains: *Humidity sensor is stuck at 78% across consecutive readings*.<br>• Corrected value estimated via **Diurnal Trend**. |
-| **5. Calibration Drift** | Select **Sensor Calibration Drift**, choose `temperature`, click **Inject Fault** | • Autoencoder reconstruction MSE spikes.<br>• Root-cause classified as **`DRIFT`**.<br>• Corrected value predicted via **Cross-Parameter Regression** using other 6 sensor channels. |
-| **6. Comm Dropout** | Select **Telemetry Dropout**, click **Inject Fault** | • Root-cause classified as **`COMMUNICATION`**.<br>• Health degradation alert triggered. |
-| **7. SHAP Breakdown** | Navigate to **Anomalies** &rarr; click **Explain** | Waterfall bar chart displays TreeSHAP feature attribution demonstrating exact physical parameter contributions. |
-| **8. Resolution** | Navigate to **Alerts Feed** &rarr; click **Resolve** | Alert status immediately transitions from active to resolved with timestamp audit. |
-
----
-
-## 📁 Repository Structure
-
-```
-skyguard-ai/
-├── backend/
-│   ├── app/
-│   │   ├── config.py              # Pydantic settings & DB config
-│   │   ├── main.py                # FastAPI app with CORS & lifespan
-│   │   ├── models/
-│   │   │   ├── database.py        # SQLAlchemy models + Supabase PostgREST async client
-│   │   │   └── schemas.py         # Request/response Pydantic models
-│   │   ├── routers/
-│   │   │   ├── alerts.py          # Alert listing and resolution
-│   │   │   ├── anomalies.py       # Anomaly logs & SHAP inspector
-│   │   │   ├── dashboard.py       # Aggregated KPIs summary
-│   │   │   ├── demo.py            # Real-time anomaly injection & generation
-│   │   │   ├── health.py          # Sensor reliability scores & history
-│   │   │   ├── observations.py    # Main ingestion pipeline
-│   │   │   ├── stations.py        # AWS station metadata & gauges
-│   │   │   └── websocket.py       # Real-time WebSocket connection manager
-│   │   └── services/
-│   │       ├── anomaly_detector.py# 3-channel score fusion (QC + IF + AE)
-│   │       ├── corrector.py       # Fault value estimation engine
-│   │       ├── data_generator.py  # IMD weather profiles & anomaly recipes
-│   │       ├── feature_engineer.py# Time-range rolling statistics & deltas
-│   │       ├── health_scorer.py   # Degradation, recovery & streak scoring
-│   │       ├── quality_checks.py  # Physical bounds & deterministic checks
-│   │       ├── root_cause.py      # 5-category hierarchical decision rules
-│   │       └── seeder.py          # Baseline data & stations seeder
-│   ├── requirements.txt
-│   └── Dockerfile
-├── ml/
-│   ├── models/                    # Serialized model artifacts (.pkl)
-│   ├── inference/
-│   │   ├── isolation_forest.py    # IF inference + TreeSHAP explainer
-│   │   └── autoencoder.py         # 14-dim MLPRegressor Autoencoder
-│   └── training/
-│       └── train_models.py        # ML training & benchmark evaluation
-├── frontend/
-│   ├── src/
-│   │   ├── components/            # Navbar, StationMap, StatCard, StatusBadge
-│   │   ├── pages/                 # Dashboard, Stations, Anomalies, Alerts, Health, Demo
-│   │   ├── services/api.js        # API & WebSocket client
-│   │   ├── App.jsx                # Router & live WebSocket dispatcher
-│   │   └── main.jsx
-│   ├── package.json
-│   └── vite.config.js
-├── docs/
-│   └── HANDOFF.md                 # Complete system handoff specification
-├── docker-compose.yml
-├── ARCHITECTURE.md
-└── README.md
+```bash
+docker compose up --build -d
 ```
 
----
+Docker reads its secrets from `backend/.env`. Train the models before building, so that `ml/models/*.pkl` exists.
 
-## 🏛️ Built for MoES / IMD Disaster Management (SIH26073)
-Developed with precision AI architectures ensuring robust weather monitoring across India.
+## Configuration (`backend/.env`)
+
+| Variable | Purpose |
+| --- | --- |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Database connection (required) |
+| `API_KEY` | When set, all write endpoints require header `X-API-Key` |
+| `CORS_ORIGINS` | Comma-separated dashboard origins |
+| `ENABLE_DEMO_ENDPOINTS` | `false` removes the `/demo/*` fault-injection routes |
+| `MAX_BATCH_SIZE`, `MAX_DEMO_GENERATE_HOURS` | Request-size limits |
+| `ML_MODEL_DIR`, `LOG_LEVEL` | Optional overrides |
+
+### Production checklist
+
+- Set `API_KEY`. Set `ENABLE_DEMO_ENDPOINTS=false`. Restrict `CORS_ORIGINS` to the real dashboard host.
+- Enable Supabase Row Level Security. Better still, give the backend a service-role key and keep the anon key away from writes.
+- Retrain the models on real station history; the shipped models are trained on synthetic data.
+
+## API overview
+
+All routes are under `/api/v1`.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/observations`, `/observations/batch` | Ingest and score observations (write) |
+| GET | `/stations`, `/stations/{id}` | Stations with live health and open alerts |
+| GET | `/stations/{id}/observations?parameter=&hours=` | Raw vs corrected series |
+| POST | `/stations` | Register a station (write) |
+| GET | `/anomalies`, `/anomalies/{id}` | Anomalies, filterable by station, severity, cause and time; detail includes SHAP and corrections |
+| GET | `/alerts` | Alerts, filterable by station, severity, status and time |
+| PATCH | `/alerts/{id}/resolve` | Resolve an alert (write) |
+| GET | `/health/{station_id}`, `/health/{station_id}/history` | Per-sensor health |
+| GET | `/dashboard/summary` | Network KPIs |
+| POST | `/demo/inject-anomaly`, `/demo/generate-data` | Fault simulation (write, can be disabled) |
+| WS | `/ws/live` | Push events: `anomaly`, `alert`, `health_update` |
+
+## Demo walkthrough
+
+1. Open the dashboard. The map shows the 5 seeded stations: Mumbai, Delhi, Chennai, Kolkata and Bengaluru.
+2. Open **Demo Center**, pick a station, and inject each scenario in turn:
+   - **Spike:** classified `spike`, corrected with the temporal median.
+   - **Frozen:** classified `frozen` after 4 identical readings, corrected with the diurnal trend.
+   - **Drift:** classified `drift` once the offset grows consistently, corrected with cross-parameter regression.
+   - **Telemetry dropout:** classified `communication`; raises a communication-loss alert.
+   - **Multivariate:** coupled deviation across several sensors.
+3. Open **Neural Diagnostics** and select a row to see the channel scores, the SHAP attribution and the corrected values.
+4. Open **Alert Feeds** and resolve an alert.
+
+## Repository layout
+
+```
+backend/
+  app/
+    main.py            FastAPI app, CORS, error handling, warm start
+    config.py          settings from environment / backend/.env
+    models/            PostgREST client, Pydantic schemas
+    routers/           REST + WebSocket endpoints
+    services/          QC, features, fusion, drift, root cause, health, correction, pipeline
+  tests/               pytest suite with an in-memory PostgREST stand-in
+  schema.sql           database schema and indexes
+ml/
+  inference/           Isolation Forest + SHAP, autoencoder scoring
+  training/            training and benchmark script
+  benchmark_results.json
+frontend/              React dashboard
+ARCHITECTURE.md        design notes
+```

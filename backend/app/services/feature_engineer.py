@@ -3,7 +3,7 @@ Computes time-range based rolling statistics, deltas, correlations, and temporal
 Produces full (~110 dims) feature vector for Isolation Forest and 14-dim vector for Autoencoder.
 Specified in /docs/HANDOFF.md §2 & §14.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -48,6 +48,43 @@ for p in PARAMETERS:
     FEATURE_NAMES.append(f"missing_{p}")
 
 
+def parse_ts(value: Any) -> Optional[datetime]:
+    """Parse an ISO string / datetime into a timezone-aware UTC datetime."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def local_solar_hour(ts: datetime, longitude: Optional[float] = None) -> float:
+    """Approximate local solar hour [0, 24). Falls back to UTC when longitude is unknown.
+
+    Diurnal behaviour (sunlight, temperature cycle) follows the sun, not UTC, so a
+    station at 77E sees noon at ~06:50 UTC. Ignoring this misplaces day/night by ~5h
+    for Indian stations.
+    """
+    hour = ts.hour + ts.minute / 60.0
+    if longitude is not None:
+        hour += float(longitude) / 15.0
+    return hour % 24.0
+
+
+def is_valid_number(value: Any) -> bool:
+    return value is not None and not (isinstance(value, float) and np.isnan(value))
+
+
+def param_delta(param: str, current: float, previous: float) -> float:
+    """Rate of change; wind direction uses the shortest angular distance (359 -> 1 is +2)."""
+    if param == "wind_direction":
+        return float(((current - previous + 180.0) % 360.0) - 180.0)
+    return float(current - previous)
+
+
 def extract_base_param(feature_name: str) -> str:
     """Extract base parameter name from derived feature name."""
     for p in PARAMETERS:
@@ -62,7 +99,8 @@ class FeatureEngineer:
     @staticmethod
     def extract_features(
         current_obs: Dict[str, Any],
-        recent_history: List[Dict[str, Any]]
+        recent_history: List[Dict[str, Any]],
+        longitude: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
         """
         Extract features from current observation + recent history (within 24h).
@@ -77,9 +115,7 @@ class FeatureEngineer:
               - compact_vector (14 dims: 7 raw + 7 deltas, numpy float64)
               - feature_dict (mapping of feature_name -> float)
         """
-        curr_time = current_obs.get("observed_at")
-        if isinstance(curr_time, str):
-            curr_time = datetime.fromisoformat(curr_time.replace("Z", "+00:00"))
+        curr_time = parse_ts(current_obs.get("observed_at")) or datetime.now(timezone.utc)
 
         # Convert recent history to DataFrame if available
         records = list(recent_history)
@@ -90,7 +126,7 @@ class FeatureEngineer:
 
         df = pd.DataFrame(records)
         if "observed_at" in df.columns:
-            df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True)
+            df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True, format="ISO8601")
             df = df.sort_values("observed_at").drop_duplicates(subset=["observed_at"])
 
         features: Dict[str, float] = {}
@@ -98,7 +134,7 @@ class FeatureEngineer:
         # 1. Raw values & missingness
         for p in PARAMETERS:
             val = current_obs.get(p)
-            if val is None or np.isnan(val):
+            if not is_valid_number(val):
                 features[f"{p}_raw"] = 0.0
                 features[f"missing_{p}"] = 1.0
             else:
@@ -114,7 +150,7 @@ class FeatureEngineer:
 
         for w_name, w_delta in window_deltas.items():
             start_window = curr_time - w_delta
-            sub_df = df[df["observed_at"] >= start_window]
+            sub_df = df[df["observed_at"] > start_window]  # (t - w, t]: matches the 4/24/96-sample training windows
 
             for p in PARAMETERS:
                 series = sub_df[p].dropna() if p in sub_df.columns else pd.Series([], dtype=float)
@@ -142,13 +178,13 @@ class FeatureEngineer:
             curr_val = current_obs.get(p)
             prev_val = prev_obs.get(p) if prev_obs else None
 
-            if curr_val is not None and prev_val is not None:
-                features[f"{p}_delta"] = float(curr_val - prev_val)
+            if is_valid_number(curr_val) and is_valid_number(prev_val):
+                features[f"{p}_delta"] = param_delta(p, float(curr_val), float(prev_val))
             else:
                 features[f"{p}_delta"] = 0.0
 
         # 4. Inter-parameter correlations over 24h
-        df_24h = df[df["observed_at"] >= (curr_time - timedelta(hours=24))]
+        df_24h = df[df["observed_at"] > (curr_time - timedelta(hours=24))]
         
         def calc_corr(col1: str, col2: str) -> float:
             if col1 in df_24h.columns and col2 in df_24h.columns:
@@ -166,7 +202,7 @@ class FeatureEngineer:
         features["corr_solar_temp"] = calc_corr("solar_radiation", "temperature")
 
         # 5. Temporal features
-        hour = curr_time.hour + curr_time.minute / 60.0
+        hour = local_solar_hour(curr_time, longitude)
         features["hour_of_day"] = float(hour / 24.0)
         features["is_daytime"] = 1.0 if (6.0 <= hour <= 18.0) else 0.0
 
